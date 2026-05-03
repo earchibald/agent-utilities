@@ -95,7 +95,7 @@ handoff_path="${cwd:-.}/HANDOFF.md"
 rm -f "$pid_file" "$sentinel_file"
 
 ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
-touch "$ready_sentinel"
+echo "$total_m1h" > "$ready_sentinel"
 
 # Output the directive prompt — appended to rewakeMessage, injected as
 # system-reminder into the model's context to trigger HANDOFF.md authoring.

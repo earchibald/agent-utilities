@@ -41,9 +41,11 @@ rem=$(( cliff_time - now_epoch ))
 
 ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
 if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
+  tokens=$(cat "$ready_sentinel" 2>/dev/null || echo "0")
+  tokens_fmt=$(printf "%'d" "$tokens" 2>/dev/null || echo "$tokens")
   handoff_path="${cwd:-.}/HANDOFF.md"
   now_hhmm=$(date '+%H:%M')
-  printf '{"systemMessage": "%s: 1h cache batch set to expire in 2m.\nHANDOFF.md document generated in local directory.\nConsider /clear or /quit to avoid paying for cache re-hydration.\nAfterwards, prompt: read %s and continue."}\n' \
-    "$now_hhmm" "$handoff_path"
+  printf '{"systemMessage": "%s: 1h cache batch set to expire in 2m (%s tokens).\nHANDOFF.md document generated in local directory.\nConsider /clear or /quit to avoid paying for cache re-hydration.\nAfterwards, prompt: read %s and continue."}\n' \
+    "$now_hhmm" "$tokens_fmt" "$handoff_path"
   rm -f "$ready_sentinel"
 fi
