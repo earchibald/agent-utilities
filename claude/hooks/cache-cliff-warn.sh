@@ -38,12 +38,20 @@ cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
   || echo "soon")
 
 handoff_path="$HOME/.claude/HANDOFF.md"
+pid_file="/tmp/claude-cliff-pid-${session_id}"
+sentinel_file="/tmp/claude-cliff-sentinel-${session_id}"
 
 # ── Cancel previous timer for this session ──────────────────────────────────
-pid_file="/tmp/claude-cliff-pid-${session_id}"
+# Write a new sentinel first — stale sleeps check this and exit harmlessly.
+echo "$cliff_time" > "$sentinel_file"
+
+# Also kill the old bash wrapper + its sleep child to avoid accumulation.
 if [[ -f "$pid_file" ]]; then
   old_pid=$(cat "$pid_file" 2>/dev/null || true)
-  [[ -n "$old_pid" ]] && kill "$old_pid" 2>/dev/null || true
+  if [[ -n "$old_pid" ]]; then
+    pkill -P "$old_pid" 2>/dev/null || true  # kill sleep child
+    kill  "$old_pid"  2>/dev/null || true    # kill bash wrapper
+  fi
   rm -f "$pid_file"
 fi
 
@@ -52,8 +60,14 @@ if [ "$rem" -gt 0 ]; then
   delay=$(( warn_time - now_epoch ))
   [ "$delay" -lt 0 ] && delay=0
 
+  expected_sentinel="$cliff_time"
+
   (
     [ "$delay" -gt 0 ] && sleep "$delay"
+
+    # Bail if a newer Stop event has already superseded this timer
+    current=$(cat "$sentinel_file" 2>/dev/null || echo "")
+    [ "$current" = "$expected_sentinel" ] || exit 0
 
     # Write HANDOFF.md
     cat > "$handoff_path" <<HANDOFF
@@ -85,7 +99,7 @@ without clean context.
 - Cache expired at: ${cliff_hhmm}
 HANDOFF
 
-    rm -f "$pid_file"
+    rm -f "$pid_file" "$sentinel_file"
   ) > /dev/null 2>&1 &
   disown $!
   echo $! > "$pid_file"

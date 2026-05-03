@@ -18,4 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - macOS `osascript` notification and terminal bell on cache cliff — UI banner via `systemMessage` is sufficient.
 
+### Fixed (2)
+
+- `kill $old_pid` only killed the bash wrapper, leaving the `sleep` child orphaned and accumulating across Stop events. Now uses `pkill -P $old_pid` to kill the sleep child before killing the wrapper.
+- Added a sentinel file (`/tmp/claude-cliff-sentinel-$session_id`) keyed to `cliff_time`: stale timers that survive the kill check the sentinel on wake and exit harmlessly if it no longer matches.
+
 [Unreleased]: https://github.com/earchibald/agent-utilities/compare/HEAD...HEAD
