@@ -38,9 +38,18 @@ read -r oldest_ts total_m1h < <(
 oldest_ts=${oldest_ts:-0}
 total_m1h=${total_m1h:-0}
 
-[ "$oldest_ts" -le 0 ] && exit 0
+# Test override: echo a future epoch into this file to skip transcript parsing
+# e.g. echo $(( $(date +%s) + 180 )) > /tmp/claude-cliff-test-cliff
+test_flag="/tmp/claude-cliff-test-cliff"
+if [[ -f "$test_flag" ]]; then
+  cliff_time=$(cat "$test_flag")
+  oldest_ts=$(( cliff_time - 3600 ))
+  total_m1h=999999
+else
+  [ "$oldest_ts" -le 0 ] && exit 0
+  cliff_time=$(( oldest_ts + 3600 ))
+fi
 
-cliff_time=$(( oldest_ts + 3600 ))
 warn_time=$(( cliff_time - 120 ))
 rem=$(( cliff_time - now_epoch ))
 

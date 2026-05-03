@@ -26,9 +26,17 @@ oldest_ts=$(
 )
 
 oldest_ts=${oldest_ts:-0}
-[ "$oldest_ts" -le 0 ] && exit 0
 
-cliff_time=$(( oldest_ts + 3600 ))
+# Test override: echo a future epoch into this file to skip transcript parsing
+# e.g. echo $(( $(date +%s) + 180 )) > /tmp/claude-cliff-test-cliff
+test_flag="/tmp/claude-cliff-test-cliff"
+if [[ -f "$test_flag" ]]; then
+  cliff_time=$(cat "$test_flag")
+else
+  [ "$oldest_ts" -le 0 ] && exit 0
+  cliff_time=$(( oldest_ts + 3600 ))
+fi
+
 rem=$(( cliff_time - now_epoch ))
 
 ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
