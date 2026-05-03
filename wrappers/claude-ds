@@ -31,6 +31,7 @@
 
 set -euo pipefail
 
+VERSION="0.2.0"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-ds"
 CONFIG_FILE="$CONFIG_DIR/config"
 KEYCHAIN_SERVICE="claude-ds"
@@ -67,6 +68,14 @@ pick_pager() {
 
 for arg in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
   case "$arg" in
+    --version|-V)
+      echo "claude-ds $VERSION"
+      if command -v claude >/dev/null 2>&1; then
+        printf '  '
+        claude --version 2>&1 || true
+      fi
+      exit 0
+      ;;
     --help|-h)
       pager=$(pick_pager)
       {
@@ -74,16 +83,17 @@ for arg in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
 claude-ds — wrapper that runs `claude` against DeepSeek's Anthropic-compatible API.
 
 USAGE
-  claude-ds [--reset-password] [--help | -h] [claude args...]
+  claude-ds [--reset-password] [--help | -h] [--version | -V] [claude args...]
 
 claude-ds-specific flags
-  --reset-password    Clear the stored API key reference and any associated
-                      OS-keychain secret, then re-run the first-run prompt.
-                      Prints loud, explicit log lines describing exactly what
-                      is removed (config file path; keychain service/account).
-                      Does NOT touch upstream stores (1Password, Infisical) —
-                      it only forgets the local reference and any secret that
-                      claude-ds itself put into the OS keychain.
+  --reset-password    Clear / rotate the stored API key reference. For
+                      `system://` references, asks whether to (1) change the
+                      key for the existing account or (2) switch to a
+                      different account / scheme (with an option to delete
+                      or keep the old keychain entry). For other schemes,
+                      forgets the local reference (upstream stores are
+                      never touched).
+  --version, -V       Print claude-ds version, plus `claude --version`.
   --help, -h          Print this help, then forward to `claude --help`.
 
 FIRST-RUN BEHAVIOR
@@ -94,8 +104,15 @@ FIRST-RUN BEHAVIOR
   For `system://<account>` references, the prompt checks the OS keychain
   first: if an entry already exists under service='claude-ds' account=<acct>,
   it is reused without asking for a key. Otherwise you are prompted for the
-  key and it is stored. To overwrite an existing entry, run
-  `claude-ds --reset-password`.
+  key and it is stored.
+
+  If you type a bare `system://` (no account), claude-ds scans the OS
+  keychain for existing entries under service='claude-ds' and lets you
+  pick by number, type 'n' to add a new one, or type a free-form name.
+
+  Surrounding ' or " quotes on entered references are stripped. All
+  visible prompts use readline editing (left/right arrows, ctrl-a/e,
+  backspace, etc.).
 
 SUPPORTED SECRET-REFERENCE SCHEMES
   op://VAULT/ITEM/FIELD               1Password CLI (`op read`).
@@ -209,6 +226,102 @@ secretref_keychain_delete() {
   esac
 }
 
+# Enumerate accounts already stored under SECRETREF_KEYCHAIN_SERVICE.
+# Echoes one account name per line (sorted, unique). Empty output if none.
+# macOS: parses `security dump-keychain` (may trigger a one-time keychain-
+#        access prompt; failures are silently empty).
+# Linux: uses `secret-tool search --all`.
+secretref_keychain_list_accounts() {
+  _secretref_require_service
+  case "$(uname -s)" in
+    Darwin)
+      security dump-keychain 2>/dev/null | awk -v svc="$SECRETREF_KEYCHAIN_SERVICE" '
+        BEGIN { RS="keychain: " }
+        index($0, "\"svce\"<blob>=\"" svc "\"") > 0 {
+          if (match($0, /"acct"<blob>="[^"]*"/)) {
+            # match is `"acct"<blob>="<value>"` — strip 14-char prefix + 1-char suffix.
+            a = substr($0, RSTART+14, RLENGTH-15)
+            if (a != "") print a
+          }
+        }
+      ' | sort -u
+      ;;
+    Linux)
+      command -v secret-tool >/dev/null || return 0
+      secret-tool search --all service "$SECRETREF_KEYCHAIN_SERVICE" 2>/dev/null \
+        | awk -F' = ' '$1=="attribute.account"{print $2}' \
+        | sort -u
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+# Strip a single layer of matching ASCII single- or double-quotes from $1.
+# Trailing/leading whitespace is left alone — we only unwrap exact quote pairs.
+_secretref_strip_quotes() {
+  local s="$1"
+  case "$s" in
+    \'*\') s="${s#\'}"; s="${s%\'}" ;;
+    \"*\") s="${s#\"}"; s="${s%\"}" ;;
+  esac
+  printf '%s' "$s"
+}
+
+# Interactive selector for a system:// account name. If existing entries are
+# stored under SECRETREF_KEYCHAIN_SERVICE, presents them as a numbered list
+# and lets the user pick by number, type a free-form new name, or accept the
+# default (new). Echoes the chosen account name to stdout.
+secretref_select_account() {
+  _secretref_require_service
+  local accounts=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && accounts+=("$line")
+  done < <(secretref_keychain_list_accounts)
+
+  if [[ ${#accounts[@]} -gt 0 ]]; then
+    {
+      echo
+      echo "Existing keychain entries for service='$SECRETREF_KEYCHAIN_SERVICE':"
+      local i=1
+      for a in "${accounts[@]}"; do
+        printf "  [%d] %s\n" "$i" "$a"
+        ((i++))
+      done
+      echo "  [n] Enter a new account name"
+    } >&2
+    printf "Choice (number, 'n' for new, or type the account name directly): " >&2
+    local choice
+    IFS= read -e -r choice
+    choice=$(_secretref_strip_quotes "$choice")
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#accounts[@]} )); then
+      printf '%s' "${accounts[$((choice-1))]}"
+      return 0
+    fi
+    if [[ -z "$choice" || "$choice" == "n" || "$choice" == "N" ]]; then
+      printf "New account name: " >&2
+      local name
+      IFS= read -e -r name
+      name=$(_secretref_strip_quotes "$name")
+      [[ -n "$name" ]] || _secretref_die "empty account name"
+      printf '%s' "$name"
+      return 0
+    fi
+    # Treat free-form input as a new (or existing) account name.
+    printf '%s' "$choice"
+  else
+    {
+      echo
+      echo "No existing keychain entries for service='$SECRETREF_KEYCHAIN_SERVICE'."
+    } >&2
+    printf "New account name: " >&2
+    local name
+    IFS= read -e -r name
+    name=$(_secretref_strip_quotes "$name")
+    [[ -n "$name" ]] || _secretref_die "empty account name"
+    printf '%s' "$name"
+  fi
+}
+
 secretref_resolve() {
   local ref="$1"
   case "$ref" in
@@ -294,16 +407,21 @@ secretref_prompt() {
     echo "Enter a secret reference. Supported schemes:"
     secretref_help_text
     echo
+    echo "(Tip: surrounding ' or \" quotes will be stripped. Use arrow keys to edit.)"
   } >&2
   printf "Reference: " >&2
   local ref
-  IFS= read -r ref
+  IFS= read -e -r ref
+  ref=$(_secretref_strip_quotes "$ref")
   [[ -n "$ref" ]] || _secretref_die "empty reference, aborting."
 
   if [[ "$ref" == system://* ]]; then
     _secretref_require_service
     local account="${ref#system://}"
-    [[ -n "$account" ]] || _secretref_die "system:// requires an account name (e.g. system://default)"
+    if [[ -z "$account" ]]; then
+      account=$(secretref_select_account)
+      ref="system://$account"
+    fi
     if secretref_keychain_lookup "$account" >/dev/null 2>&1; then
       _secretref_log "found existing keychain entry — service='$SECRETREF_KEYCHAIN_SERVICE', account='$account'. Reusing it."
       _secretref_log "to overwrite, re-run with the wrapper's --reset-password flag."
@@ -320,6 +438,71 @@ secretref_prompt() {
   fi
 
   printf '%s' "$ref"
+}
+
+# Interactive --reset-password flow. Args: <old_ref> [<label>]. Echoes the
+# new (chosen) ref to stdout.
+#
+# When old_ref is system://<acct>:
+#   [1] Change the API key for <acct> — keep account name, prompt for a new
+#       secret value, overwrite the keychain entry. Returns the same ref.
+#   [2] Switch to a different account / scheme — ask whether to delete or
+#       keep the old keychain entry, then run a fresh secretref_prompt.
+#
+# For non-system schemes, just runs secretref_reset_local (logs that the
+# upstream store is untouched) and re-prompts.
+secretref_reset_interactive() {
+  local old_ref="$1" label="${2:-secret}"
+
+  if [[ "$old_ref" == system://* ]]; then
+    _secretref_require_service
+    local old_acct="${old_ref#system://}"
+    {
+      echo
+      echo "Existing reference is system://$old_acct (service='$SECRETREF_KEYCHAIN_SERVICE')."
+      echo "  [1] Change the $label for '$old_acct' (keep account, replace stored secret)"
+      echo "  [2] Switch to a different account / scheme"
+    } >&2
+    printf "Choice [1/2, default 1]: " >&2
+    local choice
+    IFS= read -e -r choice
+    choice=$(_secretref_strip_quotes "$choice")
+    case "${choice:-1}" in
+      1)
+        printf "Paste new %s for account='%s' (will overwrite %s keychain entry): " \
+          "$label" "$old_acct" "$(uname -s)" >&2
+        local secret
+        IFS= read -rs secret
+        echo >&2
+        [[ -n "$secret" ]] || _secretref_die "empty key, aborting."
+        secretref_keychain_store "$old_acct" "$secret"
+        _secretref_log "updated keychain entry — service='$SECRETREF_KEYCHAIN_SERVICE', account='$old_acct'."
+        printf '%s' "$old_ref"
+        return 0
+        ;;
+      2)
+        printf "Delete existing keychain entry service='%s' account='%s'? [y/N]: " \
+          "$SECRETREF_KEYCHAIN_SERVICE" "$old_acct" >&2
+        local del
+        IFS= read -e -r del
+        del=$(_secretref_strip_quotes "$del")
+        if [[ "$del" =~ ^[yY] ]]; then
+          secretref_keychain_delete "$old_acct"
+          _secretref_log "deleted keychain entry — service='$SECRETREF_KEYCHAIN_SERVICE', account='$old_acct'."
+        else
+          _secretref_log "kept keychain entry — service='$SECRETREF_KEYCHAIN_SERVICE', account='$old_acct'."
+        fi
+        secretref_prompt "$label"
+        return 0
+        ;;
+      *)
+        _secretref_die "invalid choice '$choice'"
+        ;;
+    esac
+  fi
+
+  secretref_reset_local "$old_ref"
+  secretref_prompt "$label"
 }
 
 # Clean up any local secret associated with a reference (for --reset-password).
@@ -345,14 +528,11 @@ SECRETREF_KEYCHAIN_SERVICE="$KEYCHAIN_SERVICE"
 SECRETREF_LOG_PREFIX="claude-ds"
 
 # ---- first-run / reset prompt ---------------------------------------------
-prompt_for_key() {
+write_config() {
+  local ref="$1"
   umask 077
   mkdir -p "$CONFIG_DIR"
   chmod 700 "$CONFIG_DIR"
-
-  local ref
-  ref=$(secretref_prompt "DeepSeek API key for claude-ds")
-
   {
     printf 'api_key_ref=%s\n' "$ref"
     printf 'model=%s\n'       "$DEFAULT_MODEL"
@@ -361,19 +541,24 @@ prompt_for_key() {
   chmod 600 "$CONFIG_FILE"
 }
 
+prompt_for_key() {
+  local ref
+  ref=$(secretref_prompt "DeepSeek API key for claude-ds")
+  write_config "$ref"
+}
+
 # ---- handle reset ----------------------------------------------------------
 if [[ "$RESET" -eq 1 ]]; then
-  echo "claude-ds: --reset-password — clearing stored API key reference and any associated secret." >&2
+  echo "claude-ds: --reset-password — rotating stored API key reference." >&2
   if [[ -f "$CONFIG_FILE" ]]; then
     old_ref=$(awk -F= '$1=="api_key_ref"{sub(/^api_key_ref=/,""); print; exit}' "$CONFIG_FILE" || true)
-    secretref_reset_local "$old_ref"
-    rm -f "$CONFIG_FILE"
-    echo "claude-ds:   removed config file $CONFIG_FILE." >&2
+    new_ref=$(secretref_reset_interactive "$old_ref" "DeepSeek API key for claude-ds")
+    write_config "$new_ref"
+    echo "claude-ds:   wrote config $CONFIG_FILE." >&2
   else
-    echo "claude-ds:   no existing config file at $CONFIG_FILE." >&2
+    echo "claude-ds:   no existing config file at $CONFIG_FILE — running first-run prompt." >&2
+    prompt_for_key
   fi
-  echo >&2
-  prompt_for_key
 elif [[ ! -f "$CONFIG_FILE" ]]; then
   prompt_for_key
 fi

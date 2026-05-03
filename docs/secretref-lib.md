@@ -14,9 +14,12 @@ Currently lives inline in [[wrappers/claude-ds]] between the `BEGIN secretref` a
 | Function | Purpose |
 |---|---|
 | `secretref_resolve <ref>` | Resolve a reference to its secret value on stdout. Main entry point. |
-| `secretref_prompt <label>` | Interactive first-run prompt: asks the user for a reference, transparently handles `system://` keychain reuse-vs-store. Echoes the chosen ref. |
+| `secretref_prompt <label>` | Interactive first-run prompt: asks the user for a reference, transparently handles `system://` keychain reuse-vs-store. Strips surrounding `'`/`"` quotes from input. Uses `read -e` so visible prompts support readline editing (arrow keys, ctrl-a/e, backspace, etc.). When the user types a bare `system://`, runs `secretref_select_account` to pick from existing entries or enter a new one. Echoes the chosen ref. |
+| `secretref_reset_interactive <old_ref> [<label>]` | `--reset-password` flow. If `old_ref` is `system://<acct>`, prompts: [1] change the key for `<acct>` (overwrite the keychain entry), or [2] switch to a different account/scheme — and on (2) asks whether to delete or keep the old keychain entry before re-prompting. For non-system refs, just calls `secretref_reset_local` and re-prompts. Echoes the new ref. |
+| `secretref_reset_local <old_ref>` | Lower-level non-interactive reset: deletes the local secret tied to `old_ref` (only `system://` has one) and logs. Used internally by `secretref_reset_interactive` when no interaction is needed. |
+| `secretref_select_account` | Lists existing accounts under `SECRETREF_KEYCHAIN_SERVICE` and lets the user pick by number, type 'n' for a new name, or type a free-form name. Echoes the chosen account. |
+| `secretref_keychain_list_accounts` | Enumerates account names already stored under `SECRETREF_KEYCHAIN_SERVICE` (one per line, sorted, unique). macOS: parses `security dump-keychain` (may trigger one keychain-access prompt). Linux: uses `secret-tool search --all`. |
 | `secretref_help_text` | Prints the supported-schemes block (suitable for embedding in a wrapper's `--help`). |
-| `secretref_reset_local <old_ref>` | On `--reset-password`, deletes any local secret tied to the old ref (only `system://` has one) and logs what happened. |
 | `secretref_keychain_{store,lookup,delete}` | Lower-level keychain ops, used by the higher-level functions. Exposed for wrappers that need direct access. |
 
 All public functions write secrets / refs to stdout and prompts / diagnostics to stderr — same convention as `op read`.
@@ -47,8 +50,8 @@ All public functions write secrets / refs to stdout and prompts / diagnostics to
    # Resolve at runtime
    token=$(secretref_resolve "$ref")
 
-   # Reset
-   secretref_reset_local "$old_ref"
+   # --reset-password (interactive change-or-switch flow)
+   new_ref=$(secretref_reset_interactive "$old_ref" "API key for my-wrapper")
 
    # In your --help text, embed:
    secretref_help_text

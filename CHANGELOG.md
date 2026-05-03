@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `--version` / `-V` flag in `wrappers/claude-ds`. Prints `claude-ds <VERSION>` (currently `0.2.0`) followed by the underlying `claude --version`. Does not require a configured API key, so it works on a fresh box.
+- `secretref_reset_interactive <old_ref> [<label>]` in the secretref lib. Drives the new `--reset-password` flow: if `old_ref` is `system://<acct>`, prompts `[1] change key for <acct>` (overwrite stored secret, keep account) vs `[2] switch to a different account/scheme` (with a `[y/N]` follow-up to delete or keep the old keychain entry); for non-system refs, just runs the existing `secretref_reset_local` and re-prompts. The wrapper's reset block now calls this and writes the returned ref via a new `write_config` helper.
+- `secretref_keychain_list_accounts` and `secretref_select_account` in the secretref lib. The first enumerates accounts already stored under `SECRETREF_KEYCHAIN_SERVICE` (macOS via `security dump-keychain` + awk; Linux via `secret-tool search --all`). The second presents that list as a numbered selector with options to type 'n' for a new name or paste a free-form one. Wired into `secretref_prompt`: typing a bare `system://` (no account) now enters the selector.
+- Readline editing on all visible prompts in the secretref lib (`read -e -r`). Arrow keys, ctrl-a/e, ctrl-w, backspace etc. work as expected. Silent password reads stay `read -rs`.
+- `_secretref_strip_quotes` helper. Surrounding ASCII single- or double-quotes on the entered reference (and on free-form selector input) are stripped, so pasting `"system://default"` straight from a shell-history line works.
 - `docs/claude-ds.md` — user-facing doc for the `wrappers/claude-ds` wrapper: configuration layout, first-run flow, flag reference, env vars exported, and troubleshooting pointers. Wikilinks to `[[secretref-lib]]`, `[[infisical-adapter]]`, and `[[CHANGELOG]]`.
 - `docs/secretref-lib.md` — documents the reusable `secretref` bash library embedded in `wrappers/claude-ds` (BEGIN secretref … END secretref). Covers the public function surface (`secretref_resolve`, `secretref_prompt`, `secretref_help_text`, `secretref_reset_local`, `secretref_keychain_*`), the supported schemes, integration steps for new wrappers (set `SECRETREF_KEYCHAIN_SERVICE` / `SECRETREF_LOG_PREFIX`, copy the marker block), how to add new schemes, and the rationale for copy-paste over `source`.
 - Pager-routed `--help` in `wrappers/claude-ds`: a `pick_pager` shim picks `$PAGER` (when set and runnable), then falls back to `less -RF`, `more`, `cat`. Both the wrapper-specific help and `claude --help` are streamed through the same pager in one continuous block.
@@ -18,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `--reset-password` in `wrappers/claude-ds` is now a rotation flow rather than a delete-then-reprompt. It hands the old reference to `secretref_reset_interactive`, which handles change-vs-switch interactively, and writes the resulting reference via the new `write_config` helper. The pre-rotation banner now reads "rotating stored API key reference" rather than "clearing".
 - Refactored `wrappers/claude-ds` to embed the secret-handling code as a self-contained reusable library (BEGIN secretref … END secretref). Functions renamed from `resolve_ref` / `keychain_*` / `prompt_for_key`'s body to `secretref_resolve` / `secretref_keychain_*` / `secretref_prompt` / `secretref_help_text` / `secretref_reset_local`. Parameterised via `SECRETREF_KEYCHAIN_SERVICE` (required for `system://`) and `SECRETREF_LOG_PREFIX` (defaults to `secretref`); the wrapper sets both to `claude-ds` and otherwise treats the block as opaque.
 
 ### Removed

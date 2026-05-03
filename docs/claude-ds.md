@@ -47,9 +47,16 @@ For `infisical://` references the wrapper assumes `infisical login` has been run
 
 | Flag | Behaviour |
 |---|---|
-| `--reset-password` | Clears the stored reference and any associated local secret (i.e. the `system://` keychain entry, if used). Logs every removal explicitly: config-file path, keychain service+account. Does **not** touch upstream stores like 1Password or Infisical — only the local reference and local-only secrets. Re-runs the first-run prompt afterwards. |
+| `--reset-password` | Rotate the stored API key reference. For `system://` refs, the prompt asks: [1] change the key for the existing account (overwrite the keychain entry), or [2] switch to a different account/scheme — and on (2) asks whether to delete or keep the old keychain entry. For other schemes, forgets the local reference (upstream stores are never touched). |
+| `--version`, `-V` | Prints the wrapper's version followed by `claude --version`. |
 | `--help`, `-h` | Prints claude-ds-specific help (this doc, in compressed form), then appends `claude --help`. The combined output is routed through a pager: honours `$PAGER`, falls back to `less -RF`, then `more`, then `cat`. |
 | _everything else_ | Forwarded to `claude` unchanged. |
+
+### Input affordances
+
+All visible prompts use readline editing (`read -e`) — left/right arrows, ctrl-a/e, backspace, ctrl-w all work as expected. Surrounding `'` or `"` quotes on entered references are stripped (so pasting `"system://default"` from a shell-history line is fine).
+
+When you enter a bare `system://` (no account name), the wrapper scans the OS keychain for existing entries under `service='claude-ds'` and presents them as a numbered list, so you can pick an existing account or type a new one. See [[secretref-lib]] (`secretref_select_account`) for the underlying behaviour.
 
 ## Environment variables set before exec
 
