@@ -7,7 +7,7 @@ description: Drop-in bash module for resolving op://, system://, infisical:// UR
 
 A self-contained bash module that lets a wrapper script accept secrets via a small set of URI schemes, without each wrapper re-implementing 1Password / OS-keychain / Infisical handling.
 
-Currently lives inline in [[wrappers/claude-ds]] between the `BEGIN secretref` and `END secretref` markers. The block is intentionally copy-pasteable — no `source`-able file (yet); just lift the marked region.
+Currently lives inline in [[wrappers/claude-ds/claude-ds]] between the `BEGIN secretref` and `END secretref` markers. The block is intentionally copy-pasteable — no `source`-able file (yet); just lift the marked region.
 
 ## What it provides
 
@@ -39,7 +39,7 @@ All public functions write secrets / refs to stdout and prompts / diagnostics to
 
 ## How to use it in a new wrapper
 
-1. Copy the `BEGIN secretref … END secretref` block from `wrappers/claude-ds` verbatim.
+1. Copy the `BEGIN secretref … END secretref` block from `wrappers/claude-ds/claude-ds` verbatim.
 2. **Before** the block, set:
    ```bash
    SECRETREF_KEYCHAIN_SERVICE="my-wrapper"   # required for system://

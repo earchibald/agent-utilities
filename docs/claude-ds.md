@@ -5,7 +5,7 @@ description: Wrapper that runs the `claude` CLI against DeepSeek's Anthropic-com
 
 # `claude-ds`
 
-Thin shell wrapper around the `claude` CLI that points it at DeepSeek's Anthropic-compatible endpoint. Lives at `wrappers/claude-ds`. Single file, no install step beyond putting it on `PATH`.
+Thin shell wrapper around the `claude` CLI that points it at DeepSeek's Anthropic-compatible endpoint. Lives at `wrappers/claude-ds/claude-ds`. Single file, no install step beyond putting it on `PATH`.
 
 ## What it does
 

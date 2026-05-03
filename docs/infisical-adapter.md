@@ -1,6 +1,6 @@
 # Infisical adapter for `claude-ds`
 
-Reference doc for the `infisical://` secret-reference scheme implemented in `wrappers/claude-ds`. If the adapter breaks, start here.
+Reference doc for the `infisical://` secret-reference scheme implemented in `wrappers/claude-ds/claude-ds`. If the adapter breaks, start here.
 
 ## What it does
 
@@ -31,7 +31,7 @@ The parser **requires** at least three slash-separated segments (`PROJECT/ENV/PA
 
 ### Parsing reference (bash)
 
-The implementation lives in `wrappers/claude-ds` inside `resolve_ref()`'s `infisical://*)` branch. Decision flow:
+The implementation lives in `wrappers/claude-ds/claude-ds` inside `resolve_ref()`'s `infisical://*)` branch. Decision flow:
 
 1. Strip `infisical://` prefix.
 2. Split off the fragment after the **last** `#` → that's `KEY`. (Uses `${rest##*#}` so a `#` inside the path would be ambiguous — don't put `#` in folder names. Infisical doesn't allow it anyway.)
@@ -119,7 +119,7 @@ Auth could be valid but the token may not have read access to the requested env/
 
 ### 6. Parser bug?
 
-Add `set -x` near the top of `resolve_ref()` (or just temporarily echo the parsed values to stderr) and re-run. Compare against the test snippet's expected output. Fix the `infisical://*)` branch in `wrappers/claude-ds`. Update the test snippet in this doc if you change the contract.
+Add `set -x` near the top of `resolve_ref()` (or just temporarily echo the parsed values to stderr) and re-run. Compare against the test snippet's expected output. Fix the `infisical://*)` branch in `wrappers/claude-ds/claude-ds`. Update the test snippet in this doc if you change the contract.
 
 ## Things explicitly out of scope
 
@@ -168,6 +168,6 @@ parse "infisical://abc123/prod/foo"
 
 ## Where to look
 
-- Implementation: `wrappers/claude-ds`, function `resolve_ref()`, branch `infisical://*)`.
+- Implementation: `wrappers/claude-ds/claude-ds`, function `resolve_ref()`, branch `infisical://*)`.
 - Header comment block in the same file — keep usage docs there in sync with this file.
 - Changelog entry in `CHANGELOG.md` under the release that introduced the scheme.
