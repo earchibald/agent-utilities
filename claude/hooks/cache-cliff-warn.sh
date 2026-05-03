@@ -7,6 +7,7 @@ set -uo pipefail
 input=$(cat)
 transcript=$(printf '%s' "$input" | /usr/bin/jq -r '.transcript_path // empty' 2>/dev/null)
 session_id=$(printf '%s' "$input" | /usr/bin/jq -r '.session_id  // "default"' 2>/dev/null)
+cwd=$(       printf '%s' "$input" | /usr/bin/jq -r '.cwd          // empty'    2>/dev/null)
 
 [[ -z "$transcript" || ! -f "$transcript" ]] && exit 0
 
@@ -37,7 +38,7 @@ cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
   || date -d "@$cliff_time" '+%H:%M' 2>/dev/null \
   || echo "soon")
 
-handoff_path="$HOME/.claude/HANDOFF.md"
+handoff_path="${cwd:-$HOME}/HANDOFF.md"
 pid_file="/tmp/claude-cliff-pid-${session_id}"
 sentinel_file="/tmp/claude-cliff-sentinel-${session_id}"
 
@@ -84,7 +85,7 @@ without clean context.
 2. Commit any in-progress changes (\`git add -p && git commit -m "wip: ..."\`)
 3. Type \`/quit\` (or Ctrl-C) to end this session
 4. Start a new Claude Code session in the same working directory
-5. Begin with: *"Continuing from HANDOFF.md — \`cat ~/.claude/HANDOFF.md\`"*
+5. Begin with: *"Continuing from HANDOFF.md — \`cat ${handoff_path}\`"*
 
 ## What to brief the new session on
 
@@ -108,8 +109,8 @@ fi
 # ── systemMessage: shown in Claude UI (not injected into context) ────────────
 # Only surfaces after the cliff passes — the statusline handles pre-cliff colour.
 if [ "$rem" -le 0 ]; then
-  printf '{"systemMessage": "💀 1h cache expired at %s — this session is dead. Run /compact, commit WIP, then /quit and start fresh. See ~/.claude/HANDOFF.md"}\n' \
-    "$cliff_hhmm"
+  printf '{"systemMessage": "💀 1h cache expired at %s — this session is dead. Run /compact, commit WIP, then /quit and start fresh. Prompt: read %s and continue"}\n' \
+    "$cliff_hhmm" "$handoff_path"
 fi
 
 exit 0

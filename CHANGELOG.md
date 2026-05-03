@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - macOS `osascript` notification and terminal bell on cache cliff — UI banner via `systemMessage` is sufficient.
 
+### Changed
+
+- HANDOFF.md is now written to the agent's CWD (`cwd` from Stop hook stdin) rather than `~/.claude/`
+- `systemMessage` prompt changed from "See \<path\>" to "Prompt: read \<path\> and continue"
+
 ### Fixed (2)
 
 - `kill $old_pid` only killed the bash wrapper, leaving the `sleep` child orphaned and accumulating across Stop events. Now uses `pkill -P $old_pid` to kill the sleep child before killing the wrapper.
