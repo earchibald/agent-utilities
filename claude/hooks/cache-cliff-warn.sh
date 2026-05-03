@@ -45,6 +45,9 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
   tokens_fmt=$(printf "%'d" "$tokens" 2>/dev/null || echo "$tokens")
   handoff_path="${cwd:-.}/HANDOFF.md"
   now_hhmm=$(date '+%H:%M')
+  cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
+    || date -d "@$cliff_time" '+%H:%M' 2>/dev/null \
+    || echo "unknown")
 
   # Check permission status if creation was attempted this cycle
   perm_line=""
@@ -70,6 +73,7 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
   fi
 
   # Compute token delta from handoff generation
+  d_in=0; d_out=0
   delta_line=""
   stats_file="/tmp/claude-cliff-stats-${session_id}"
   if [ -f "$stats_file" ]; then
@@ -97,4 +101,25 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
 
   /usr/bin/jq -n --arg m "$msg" '{"systemMessage": $m}'
   rm -f "$ready_sentinel"
+
+  # Test mode only: write structured stats file and banner-fired sentinel
+  # for the loop harness to detect and analyze.
+  if [[ -f "$test_flag" ]]; then
+    /usr/bin/jq -n \
+      --argjson cliff_epoch    "$cliff_time" \
+      --arg     cliff_hhmm     "$cliff_hhmm" \
+      --argjson tokens_expiring "$tokens" \
+      --argjson cost_in        "$d_in" \
+      --argjson cost_out       "$d_out" \
+      --argjson banner_fired_at "$now_epoch" \
+      '{
+        cliff_epoch:      $cliff_epoch,
+        cliff_hhmm:       $cliff_hhmm,
+        tokens_expiring:  $tokens_expiring,
+        handoff_cost_in:  $cost_in,
+        handoff_cost_out: $cost_out,
+        banner_fired_at:  $banner_fired_at
+      }' > "${cwd:-.}/HANDOFF-stats.json"
+    touch "/tmp/claude-cliff-banner-fired-${session_id}"
+  fi
 fi
