@@ -24,15 +24,17 @@ The outgoing agent has full session context loaded. That is the moment it is bes
 
 The `cache-cliff-handoff.sh` hook uses `asyncRewake` — a Claude Code feature that lets a background process re-inject a system-level directive into the model at a scheduled time. The flow:
 
-1. Every Stop event fires the hook (async). It kills the previous instance, registers itself, and sleeps.
-2. At **cliff − 60 seconds**, the hook wakes, checks that it has not been superseded, then exits with code 2.
+1. Every Stop event fires `cache-cliff-handoff.sh` (async). It kills the previous instance, registers itself, and sleeps.
+2. At **cliff − 120 seconds**, the hook wakes, checks it has not been superseded, snapshots cumulative input/output tokens, writes a ready-sentinel, then exits with code 2.
 3. Claude Code injects the hook's stdout as a `system-reminder` — not a user message, not a context token — and wakes the model.
-4. The model writes `HANDOFF.md` into the project's CWD.
-5. The user receives the post-cliff `systemMessage` banner ("Prompt: read HANDOFF.md and continue") if they miss the window.
+4. The model writes `HANDOFF.md` into the project's CWD and, if requested, adds missing `Write(...)` permissions to settings.
+5. On the next Stop, `cache-cliff-warn.sh` (sync) reads the ready-sentinel + a fresh transcript snapshot, computes the generation token-delta, and emits a `systemMessage` banner: cliff time, tokens expiring, generation cost, permission status.
 
-## Why 60 seconds before the cliff?
+## Why 120 seconds before the cliff?
 
-The cache is still fully warm at T−60. The model can read the transcript and reason about next steps without paying rehydration cost. Writing HANDOFF.md costs one extra response turn; the cache pays for it.
+The cache is still fully warm at T−120. The model can read the transcript and reason about next steps without paying rehydration cost. Writing HANDOFF.md costs one extra response turn; the cache pays for it.
+
+We use 120 s rather than 60 s because empirically the model takes 20–60 s to write a multi-section directive document, and we want the resulting `systemMessage` banner to fire **before** the cliff, leaving the user a real window to act. With T−60, slow generations would land past the cliff and the banner would be useless.
 
 ## Threshold gating
 
@@ -49,3 +51,41 @@ Generation is skipped if `total_m1h_tokens < CACHE_CLIFF_MIN_TOKENS` (default: 2
 - **Forward-looking** — what to do next, not what was done.
 - **Minimal** — one agent turn of reading, not a transcript. If it takes more than 2 minutes to read, it is too long.
 - **Local** — written to the project's CWD so the next agent finds it immediately on start.
+
+## Tuning History
+
+The asyncRewake handoff was tuned over a series of test cycles using the harness in `docs/testing-protocol.md`. Each cycle armed `/tmp/claude-cliff-test-cliff` with a future epoch, then a `/loop` cron polled `HANDOFF-stats.json` for the captured token delta. `cost_in` is the input-token delta, `cost_out` is the output-token delta over the window from handoff.sh fire to warn.sh fire.
+
+### Token cost across cycles
+
+| # | Date | Rewake-prompt change | Other notable work this cycle | `cost_in` | `cost_out` | Notes |
+|---|------|----------------------|-------------------------------|-----------|------------|-------|
+| 1 | 2026-05-03 | none (baseline) | — | ~0 | 4142 | Verbose HANDOFF; no constraint |
+| 2 | 2026-05-03 | none | — | ~0 | 783 | Coincidentally tight |
+| 3 | 2026-05-03 | none | first perm-add Edit (HANDOFF.md) | ~0 | 3552 | High variance motivated #2 |
+| 4 | 2026-05-03 | `Be concise. Target under 800 words.` | second perm-add Edit (HANDOFF-stats.json) | 15 | 2366 | HANDOFF body alone: 459 words ≈ 596 tokens |
+
+**Read carefully.** `cost_out` bundles the HANDOFF.md body **and** every other output token between the two Stops — perm-add Edit calls, status checks, tool-call JSON wrapping. Cycles 3 and 4 each included a one-time perm-add to settings.json; cycles 1 and 2 did not. The hint in cycle 4 made the file content concise (459 words, well under 800), but the metric still reads ~2 k because of that ancillary work.
+
+### What we learned
+
+- **`cost_in` is effectively zero** — full conversation context is served from cache, only the rewake directive itself is novel input. This validates the cache-economics premise: handoff is cheap to generate.
+- **`cost_out` is dominated by the HANDOFF body but contaminated by anything else the model does between fires.** The metric is useful for trend detection (cycle-over-cycle changes) but not for absolute targeting.
+- **Variance pre-hint was 783–4142.** Post-hint we have only one data point (2366), but the file content itself was 459 words — the prompt successfully constrained the body.
+- **Don't over-tune the hint based on `cost_out` alone.** Word-count of HANDOFF.md is the cleaner metric. Future tuning should `wc -w HANDOFF.md` immediately after each cycle and compare against the 800-word target rather than chasing the noisy token delta.
+
+### Structural fixes during tuning
+
+These were caught during the tuning runs and shipped before the final cycle:
+
+| Bug | Symptom | Fix | Commit |
+|---|---|---|---|
+| Invalid JSON in `systemMessage` | Banner silently never appeared | `printf` with literal `\n` produced unparseable JSON; switched to `jq -n --arg m "$msg" '{"systemMessage": $m}'` | (early) |
+| Tight re-fire loop | Hook re-armed and re-fired immediately when `delay≤0` | Bail when `delay≤0` and ready-sentinel exists | 469284f |
+| Perm-check double-escape | Banner reported "could not add" for permissions that were in fact added | Switched jq filter from `test($p)` (regex, with `${pattern//./\\\\.}` escaping) to `contains($f)` (plain substring match) | 237e541 |
+
+## Operational properties
+
+- **Test mode** is gated on `/tmp/claude-cliff-test-cliff`. Real production fires never write `HANDOFF-stats.json` and never touch a banner-fired sentinel — those are harness-only artifacts.
+- **Sentinels** under `/tmp/claude-cliff-{pid,sentinel,ready,stats,perm-requested,banner-fired}-${session_id}` are namespaced by session and cleaned up by their respective hook. A stale sentinel will never cause a misfire because `handoff.sh` overwrites the cliff-time sentinel on every Stop and bails on mismatch when it wakes.
+- **Threshold gate** (`CACHE_CLIFF_MIN_TOKENS`, default 20 000) is bypassed in test mode by setting `total_m1h=999999` so the harness can run without a fully-loaded cache.
