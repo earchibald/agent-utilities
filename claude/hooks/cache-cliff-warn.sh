@@ -88,7 +88,7 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
     d_out=$(( cur_out - snap_out ))
     d_in_fmt=$(printf  "%'d" "$d_in"  2>/dev/null || echo "$d_in")
     d_out_fmt=$(printf "%'d" "$d_out" 2>/dev/null || echo "$d_out")
-    delta_line=$'\nHandoff cost: '"${d_in_fmt} in / ${d_out_fmt} out"
+    delta_line=$'\nHANDOFF.md generation cost: '"${d_in_fmt} in / ${d_out_fmt} out"
     rm -f "$stats_file"
   fi
 
