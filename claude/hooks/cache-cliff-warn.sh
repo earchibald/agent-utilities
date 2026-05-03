@@ -58,7 +58,7 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
       found=false
       perm_scope=""
       for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
-        if [[ -f "$sf" ]] && /usr/bin/jq -e --arg p "${pattern//./\\\\.}" '(.permissions.allow // [])[] | select(test($p))' "$sf" &>/dev/null; then
+        if [[ -f "$sf" ]] && /usr/bin/jq -e --arg f "$pattern" '(.permissions.allow // [])[] | select(contains($f))' "$sf" &>/dev/null; then
           found=true
           [[ "$sf" == "$HOME/.claude/settings.json" ]] && perm_scope="global" || perm_scope="project"
           break

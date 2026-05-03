@@ -98,14 +98,14 @@ handoff_path="${cwd:-.}/HANDOFF.md"
 
 # Check Write permissions for HANDOFF.md and HANDOFF-stats.json
 missing_perms=()
-for pattern in "HANDOFF\\.md" "HANDOFF-stats\\.json"; do
+for filename in "HANDOFF.md" "HANDOFF-stats.json"; do
   found=false
   for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
-    if [[ -f "$sf" ]] && /usr/bin/jq -e --arg p "$pattern" '(.permissions.allow // [])[] | select(test($p))' "$sf" &>/dev/null; then
+    if [[ -f "$sf" ]] && /usr/bin/jq -e --arg f "$filename" '(.permissions.allow // [])[] | select(contains($f))' "$sf" &>/dev/null; then
       found=true; break
     fi
   done
-  $found || missing_perms+=("${pattern//\\\\/}")
+  $found || missing_perms+=("$filename")
 done
 
 rm -f "$pid_file" "$sentinel_file"
