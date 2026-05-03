@@ -28,7 +28,7 @@ oldest_ts=$(
 oldest_ts=${oldest_ts:-0}
 
 # Test override: echo a future epoch into this file to skip transcript parsing
-# e.g. echo $(( $(date +%s) + 180 )) > /tmp/claude-cliff-test-cliff
+# e.g. echo $(( $(date +%s) + 300 )) > /tmp/claude-cliff-test-cliff
 test_flag="/tmp/claude-cliff-test-cliff"
 if [[ -f "$test_flag" ]]; then
   cliff_time=$(cat "$test_flag")
@@ -45,7 +45,56 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
   tokens_fmt=$(printf "%'d" "$tokens" 2>/dev/null || echo "$tokens")
   handoff_path="${cwd:-.}/HANDOFF.md"
   now_hhmm=$(date '+%H:%M')
-  printf '{"systemMessage": "%s: 1h cache batch set to expire in 2m (%s tokens).\nHANDOFF.md document generated in local directory.\nConsider /clear or /quit to avoid paying for cache re-hydration.\nAfterwards, prompt: read %s and continue."}\n' \
-    "$now_hhmm" "$tokens_fmt" "$handoff_path"
+
+  # Check permission status if creation was attempted this cycle
+  perm_line=""
+  perm_request_sentinel="/tmp/claude-cliff-perm-requested-${session_id}"
+  if [ -f "$perm_request_sentinel" ]; then
+    perm_found=false
+    perm_scope=""
+    for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
+      if [[ -f "$sf" ]] && /usr/bin/jq -e '(.permissions.allow // [])[] | select(test("HANDOFF\\.md"))' "$sf" &>/dev/null; then
+        perm_found=true
+        [[ "$sf" == "$HOME/.claude/settings.json" ]] \
+          && perm_scope="global (~/.claude/settings.json)" \
+          || perm_scope="project (.claude/settings.json)"
+        break
+      fi
+    done
+    rm -f "$perm_request_sentinel"
+    if $perm_found; then
+      perm_line=$'\nWrite(HANDOFF.md) permission added to '"$perm_scope."
+    else
+      perm_line=$'\nWrite(HANDOFF.md) could not be added automatically. Add manually: permissions.allow -> "Write(HANDOFF.md)" in ~/.claude/settings.json'
+    fi
+  fi
+
+  # Compute token delta from handoff generation
+  delta_line=""
+  stats_file="/tmp/claude-cliff-stats-${session_id}"
+  if [ -f "$stats_file" ]; then
+    read -r snap_in snap_out < "$stats_file"
+    read -r cur_in cur_out < <(
+      /usr/bin/jq -rs '
+        [ .[] | select(.type=="assistant" and (.message.usage // empty)) | .message.usage ]
+        | "\(map(.input_tokens  // 0) | add // 0) \(map(.output_tokens // 0) | add // 0)"
+      ' "$transcript" 2>/dev/null
+    )
+    d_in=$(( cur_in  - snap_in  ))
+    d_out=$(( cur_out - snap_out ))
+    d_in_fmt=$(printf  "%'d" "$d_in"  2>/dev/null || echo "$d_in")
+    d_out_fmt=$(printf "%'d" "$d_out" 2>/dev/null || echo "$d_out")
+    delta_line=$'\nHandoff cost: '"${d_in_fmt} in / ${d_out_fmt} out"
+    rm -f "$stats_file"
+  fi
+
+  msg="${now_hhmm}: 1h cache batch set to expire in 2m (${tokens_fmt} tokens)."
+  msg+=$'\nHANDOFF.md generated in local directory.'
+  msg+=$'\nConsider /clear or /quit to avoid paying for cache re-hydration.'
+  msg+=$'\nAfterwards, prompt: read '"${handoff_path}"' and continue.'
+  msg+="$delta_line"
+  msg+="$perm_line"
+
+  /usr/bin/jq -n --arg m "$msg" '{"systemMessage": $m}'
   rm -f "$ready_sentinel"
 fi

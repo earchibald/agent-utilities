@@ -80,6 +80,10 @@ echo "$cliff_time" > "$sentinel_file"
 trap 'pkill -P $$ 2>/dev/null; exit 0' TERM INT
 
 delay=$(( warn_time - now_epoch ))
+# If we're already past warn_time and the ready-sentinel exists, we already
+# fired this round — bail to prevent a tight re-fire loop.
+ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
+[ "$delay" -le 0 ] && [ -f "$ready_sentinel" ] && exit 0
 [ "$delay" -gt 0 ] && sleep "$delay"
 
 # Bail if superseded by a later Stop event
@@ -103,17 +107,27 @@ done
 
 rm -f "$pid_file" "$sentinel_file"
 
-ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
 echo "$total_m1h" > "$ready_sentinel"
 
-# Build optional permission note
+# Snapshot cumulative token counts so warn.sh can report the generation delta
+stats_file="/tmp/claude-cliff-stats-${session_id}"
+/usr/bin/jq -rs '
+  [ .[] | select(.type=="assistant" and (.message.usage // empty)) | .message.usage ]
+  | "\(map(.input_tokens  // 0) | add // 0) \(map(.output_tokens // 0) | add // 0)"
+' "$transcript" > "$stats_file" 2>/dev/null || true
+
+# Flag for warn.sh: permission creation was requested this cycle
+perm_request_sentinel="/tmp/claude-cliff-perm-requested-${session_id}"
 perm_note=""
 if $perm_missing; then
+  touch "$perm_request_sentinel"
   perm_note='
 ## Permission Setup
 No Write permission for HANDOFF.md was found in ~/.claude/settings.json or .claude/settings.json.
 Attempt to add "Write(HANDOFF.md)" to the permissions.allow array in ~/.claude/settings.json (global, preferred).
 If you cannot make that edit, tell the user: add "Write(HANDOFF.md)" to permissions.allow in ~/.claude/settings.json (global) or .claude/settings.json (project-only).'
+else
+  rm -f "$perm_request_sentinel"
 fi
 
 # Output the directive prompt — appended to rewakeMessage, injected as
