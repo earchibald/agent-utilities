@@ -53,23 +53,24 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
   perm_line=""
   perm_request_sentinel="/tmp/claude-cliff-perm-requested-${session_id}"
   if [ -f "$perm_request_sentinel" ]; then
-    perm_found=false
-    perm_scope=""
-    for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
-      if [[ -f "$sf" ]] && /usr/bin/jq -e '(.permissions.allow // [])[] | select(test("HANDOFF\\.md"))' "$sf" &>/dev/null; then
-        perm_found=true
-        [[ "$sf" == "$HOME/.claude/settings.json" ]] \
-          && perm_scope="global (~/.claude/settings.json)" \
-          || perm_scope="project (.claude/settings.json)"
-        break
+    added=(); failed=()
+    while IFS= read -r pattern; do
+      found=false
+      perm_scope=""
+      for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
+        if [[ -f "$sf" ]] && /usr/bin/jq -e --arg p "${pattern//./\\\\.}" '(.permissions.allow // [])[] | select(test($p))' "$sf" &>/dev/null; then
+          found=true
+          [[ "$sf" == "$HOME/.claude/settings.json" ]] && perm_scope="global" || perm_scope="project"
+          break
+        fi
+      done
+      if $found; then added+=("Write($pattern) → $perm_scope")
+      else         failed+=("Write($pattern)")
       fi
-    done
+    done < "$perm_request_sentinel"
     rm -f "$perm_request_sentinel"
-    if $perm_found; then
-      perm_line=$'\nWrite(HANDOFF.md) permission added to '"$perm_scope."
-    else
-      perm_line=$'\nWrite(HANDOFF.md) could not be added automatically. Add manually: permissions.allow -> "Write(HANDOFF.md)" in ~/.claude/settings.json'
-    fi
+    [ "${#added[@]}"  -gt 0 ] && perm_line+=$'\nPermissions added: '"$(printf '%s, ' "${added[@]}" | sed 's/, $//')"'.'
+    [ "${#failed[@]}" -gt 0 ] && perm_line+=$'\nCould not add automatically (add manually to permissions.allow): '"$(printf '%s, ' "${failed[@]}" | sed 's/, $//')"'.'
   fi
 
   # Compute token delta from handoff generation

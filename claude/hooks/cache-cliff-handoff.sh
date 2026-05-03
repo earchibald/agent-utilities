@@ -96,13 +96,16 @@ cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
 
 handoff_path="${cwd:-.}/HANDOFF.md"
 
-# Check whether a Write permission covering HANDOFF.md exists in settings
-perm_missing=true
-for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
-  if [[ -f "$sf" ]] && /usr/bin/jq -e '(.permissions.allow // [])[] | select(test("HANDOFF\\.md"))' "$sf" &>/dev/null; then
-    perm_missing=false
-    break
-  fi
+# Check Write permissions for HANDOFF.md and HANDOFF-stats.json
+missing_perms=()
+for pattern in "HANDOFF\\.md" "HANDOFF-stats\\.json"; do
+  found=false
+  for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
+    if [[ -f "$sf" ]] && /usr/bin/jq -e --arg p "$pattern" '(.permissions.allow // [])[] | select(test($p))' "$sf" &>/dev/null; then
+      found=true; break
+    fi
+  done
+  $found || missing_perms+=("${pattern//\\\\/}")
 done
 
 rm -f "$pid_file" "$sentinel_file"
@@ -119,13 +122,14 @@ stats_file="/tmp/claude-cliff-stats-${session_id}"
 # Flag for warn.sh: permission creation was requested this cycle
 perm_request_sentinel="/tmp/claude-cliff-perm-requested-${session_id}"
 perm_note=""
-if $perm_missing; then
-  touch "$perm_request_sentinel"
-  perm_note='
+if [ "${#missing_perms[@]}" -gt 0 ]; then
+  printf '%s\n' "${missing_perms[@]}" > "$perm_request_sentinel"
+  missing_list=$(printf '"Write(%s)" ' "${missing_perms[@]}")
+  perm_note="
 ## Permission Setup
-No Write permission for HANDOFF.md was found in ~/.claude/settings.json or .claude/settings.json.
-Attempt to add "Write(HANDOFF.md)" to the permissions.allow array in ~/.claude/settings.json (global, preferred).
-If you cannot make that edit, tell the user: add "Write(HANDOFF.md)" to permissions.allow in ~/.claude/settings.json (global) or .claude/settings.json (project-only).'
+The following Write permissions were not found in ~/.claude/settings.json or .claude/settings.json: ${missing_list}
+Attempt to add each to the permissions.allow array in ~/.claude/settings.json (global, preferred).
+If you cannot make those edits, tell the user: add them manually to permissions.allow in ~/.claude/settings.json (global) or .claude/settings.json (project-only)."
 else
   rm -f "$perm_request_sentinel"
 fi
