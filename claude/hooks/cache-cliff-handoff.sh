@@ -183,6 +183,11 @@ fi
 # system-reminder into the model's context to trigger HANDOFF.md authoring.
 cat <<PROMPT
 The 1h prompt-cache expires at ${cliff_hhmm} (~2m). Write ${handoff_path} now.
+
+⚠️ DEFER IF BUSY: If the user has just given you new work and you are actively responding to that request, do NOT write the handoff. Finish their task. At the end of your reply, add one short line: "Cache cliff approached at ${cliff_hhmm} — run \`/handoff\` when ready." Then stop. Interrupting in-progress work to write a handoff is worse than missing one cycle.
+
+Otherwise — proceed with the handoff below.
+
 Be concise. Target under 800 words. The next agent is capable — orient them, don't exhaustively document.
 
 This is a directive for the next agent session — not a history summary or compact.
