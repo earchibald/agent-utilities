@@ -15,6 +15,10 @@ transcript=$(printf '%s' "$input" | /usr/bin/jq -r '.transcript_path // empty' 2
 session_id=$(printf '%s' "$input" | /usr/bin/jq -r '.session_id  // "default"' 2>/dev/null)
 cwd=$(       printf '%s' "$input" | /usr/bin/jq -r '.cwd         // empty'     2>/dev/null)
 
+# Sanitize session_id for use in /tmp paths (prevent traversal / shell metas)
+session_id=$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9._-' | head -c 64)
+[[ -z "$session_id" ]] && session_id="default"
+
 [[ -z "$transcript" || ! -f "$transcript" ]] && exit 0
 
 now_epoch=$(date +%s)
@@ -24,10 +28,10 @@ read -r oldest_ts total_m1h < <(
   /usr/bin/jq -rs --argjson now "$now_epoch" '
     [ .[]
       | select(.type=="assistant" and (.message.usage // empty))
-      | { ts: (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601),
+      | { ts: (try (.timestamp | sub("\\.[0-9]+"; "") | fromdateiso8601) catch 0),
           m1h: (.message.usage.cache_creation.ephemeral_1h_input_tokens // 0) }
     ]
-    | [ .[] | select(.ts > ($now - 3600) and .m1h > 0) ]
+    | [ .[] | select(.ts >= ($now - 3600) and .m1h > 0) ]
     | sort_by(.ts)
     | { oldest: (first // {ts:0} | .ts | floor),
         total:  (map(.m1h) | add // 0) }
@@ -72,9 +76,12 @@ if [[ -f "$pid_file" ]]; then
   rm -f "$pid_file"
 fi
 
-# Register self and write sentinel
-echo "$$"        > "$pid_file"
-echo "$cliff_time" > "$sentinel_file"
+# Register self. Sentinel encodes both cliff_time AND owning PID, so a
+# stale predecessor whose cliff_time is unchanged still detects supersession
+# (cliff_time alone is often stable across consecutive Stops).
+echo "$$"               > "$pid_file"
+own_token="${cliff_time}_$$"
+echo "$own_token"       > "$sentinel_file"
 
 # Ensure sleep child is killed if this process is killed
 trap 'pkill -P $$ 2>/dev/null; exit 0' TERM INT
@@ -86,9 +93,9 @@ ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
 [ "$delay" -le 0 ] && [ -f "$ready_sentinel" ] && exit 0
 [ "$delay" -gt 0 ] && sleep "$delay"
 
-# Bail if superseded by a later Stop event
+# Bail if superseded by a later Stop event (token mismatch = newer registrant)
 current=$(cat "$sentinel_file" 2>/dev/null || echo "")
-[ "$current" = "$cliff_time" ] || exit 0
+[ "$current" = "$own_token" ] || exit 0
 
 cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
   || date -d "@$cliff_time" '+%H:%M' 2>/dev/null \
@@ -101,7 +108,7 @@ missing_perms=()
 for filename in "HANDOFF.md" "HANDOFF-stats.json"; do
   found=false
   for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
-    if [[ -f "$sf" ]] && /usr/bin/jq -e --arg f "$filename" '(.permissions.allow // [])[] | select(contains($f))' "$sf" &>/dev/null; then
+    if [[ -f "$sf" ]] && /usr/bin/jq -e --arg f "$filename" '(.permissions.allow // [])[] | select(. == "Write(" + $f + ")" or (startswith("Write(") and endswith("/" + $f + ")")))' "$sf" &>/dev/null; then
       found=true; break
     fi
   done
@@ -128,8 +135,8 @@ if [ "${#missing_perms[@]}" -gt 0 ]; then
   perm_note="
 ## Permission Setup
 The following Write permissions were not found in ~/.claude/settings.json or .claude/settings.json: ${missing_list}
-Attempt to add each to the permissions.allow array in ~/.claude/settings.json (global, preferred).
-If you cannot make those edits, tell the user: add them manually to permissions.allow in ~/.claude/settings.json (global) or .claude/settings.json (project-only)."
+Tell the user (in your reply): add these manually to permissions.allow in ~/.claude/settings.json (global, preferred) or .claude/settings.json (project-only).
+Only attempt the edit yourself if you already have Edit permission for the settings file — otherwise asking will stall the cliff window. The next agent session can complete the add."
 else
   rm -f "$perm_request_sentinel"
 fi

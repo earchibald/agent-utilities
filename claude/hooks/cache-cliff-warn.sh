@@ -8,6 +8,9 @@ transcript=$(printf '%s' "$input" | /usr/bin/jq -r '.transcript_path // empty' 2
 session_id=$(printf '%s' "$input" | /usr/bin/jq -r '.session_id    // "default"' 2>/dev/null)
 cwd=$(       printf '%s' "$input" | /usr/bin/jq -r '.cwd           // empty'     2>/dev/null)
 
+session_id=$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9._-' | head -c 64)
+[[ -z "$session_id" ]] && session_id="default"
+
 [[ -z "$transcript" || ! -f "$transcript" ]] && exit 0
 
 now_epoch=$(date +%s)
@@ -16,10 +19,10 @@ oldest_ts=$(
   /usr/bin/jq -rs --argjson now "$now_epoch" '
     [ .[]
       | select(.type=="assistant" and (.message.usage // empty))
-      | { ts: (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601),
+      | { ts: (try (.timestamp | sub("\\.[0-9]+"; "") | fromdateiso8601) catch 0),
           m1h: (.message.usage.cache_creation.ephemeral_1h_input_tokens // 0) }
     ]
-    | [ .[] | select(.ts > ($now - 3600) and .m1h > 0) ]
+    | [ .[] | select(.ts >= ($now - 3600) and .m1h > 0) ]
     | sort_by(.ts) | first // {ts: 0}
     | .ts | floor
   ' "$transcript" 2>/dev/null
@@ -40,6 +43,11 @@ fi
 rem=$(( cliff_time - now_epoch ))
 
 ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
+# If the cliff has already passed, cleanup the orphaned ready-sentinel so a
+# stale token count from a prior cycle never feeds a future banner.
+if [ "$rem" -le 0 ] && [ -f "$ready_sentinel" ]; then
+  rm -f "$ready_sentinel" "/tmp/claude-cliff-stats-${session_id}" "/tmp/claude-cliff-perm-requested-${session_id}"
+fi
 if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
   tokens=$(cat "$ready_sentinel" 2>/dev/null || echo "0")
   tokens_fmt=$(printf "%'d" "$tokens" 2>/dev/null || echo "$tokens")
@@ -58,7 +66,7 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
       found=false
       perm_scope=""
       for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
-        if [[ -f "$sf" ]] && /usr/bin/jq -e --arg f "$pattern" '(.permissions.allow // [])[] | select(contains($f))' "$sf" &>/dev/null; then
+        if [[ -f "$sf" ]] && /usr/bin/jq -e --arg f "$pattern" '(.permissions.allow // [])[] | select(. == "Write(" + $f + ")" or (startswith("Write(") and endswith("/" + $f + ")")))' "$sf" &>/dev/null; then
           found=true
           [[ "$sf" == "$HOME/.claude/settings.json" ]] && perm_scope="global" || perm_scope="project"
           break
@@ -78,13 +86,15 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
   delta_line=""
   stats_file="/tmp/claude-cliff-stats-${session_id}"
   if [ -f "$stats_file" ]; then
-    read -r snap_in snap_out < "$stats_file"
+    snap_in=0; snap_out=0; cur_in=0; cur_out=0
+    read -r snap_in snap_out < "$stats_file" || true
     read -r cur_in cur_out < <(
       /usr/bin/jq -rs '
         [ .[] | select(.type=="assistant" and (.message.usage // empty)) | .message.usage ]
         | "\(map(.input_tokens  // 0) | add // 0) \(map(.output_tokens // 0) | add // 0)"
       ' "$transcript" 2>/dev/null
-    )
+    ) || true
+    : "${snap_in:=0}" "${snap_out:=0}" "${cur_in:=0}" "${cur_out:=0}"
     d_in=$(( cur_in  - snap_in  ))
     d_out=$(( cur_out - snap_out ))
     d_in_fmt=$(printf  "%'d" "$d_in"  2>/dev/null || echo "$d_in")

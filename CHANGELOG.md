@@ -25,10 +25,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- Redirect background subshell to `/dev/null` before `&` so Claude Code's hook runner does not wait on inherited stdout/stderr (caused Stop hooks to hang for the full sleep duration).
-- `kill $old_pid` only killed the bash wrapper, leaving the `sleep` child orphaned and accumulating across Stop events. Now uses `pkill -P $old_pid` to kill the sleep child before killing the wrapper.
-- Added a sentinel file (`/tmp/claude-cliff-sentinel-$session_id`) keyed to `cliff_time`: stale timers that survive the kill check the sentinel on wake and exit harmlessly if it no longer matches.
-- Permission check in both hooks now uses `jq … contains($f)` with plain filenames instead of `test($p)` with regex-escaped patterns — eliminates a double-escape bug that caused false "could not add" reports and spurious re-add instructions for already-present permissions.
+- Migrated from a manually-backgrounded subshell to Claude Code's `asyncRewake: true` Stop-hook flag: the hook runs in the foreground of an async-spawned process, eliminating the need for `&` + `disown` and removing a class of inherited-fd hang bugs.
+- Supersession sentinel now encodes both `cliff_time` and the owning PID (`${cliff_time}_${$$}`). Previously, when consecutive Stops produced the same `cliff_time` (the common case mid-session) the supersession check was a no-op and duplicate suppression silently relied on the `kill` of the predecessor — making the redundancy in the design illusory. PID-keyed tokens make the check load-bearing.
+- Permission check in both hooks anchors to `Write(<file>)` exactly (`. == "Write(" + $f + ")"` plus an `endswith("/" + $f + ")")` clause for absolute-path forms) instead of plain substring `contains($f)`. The previous regex `test($p)` with `${pattern//./\\\\.}` escaping caused false "could not add" reports (double-escape); a plain `contains()` fix replaced it but matched too liberally — `Read(HANDOFF.md)` or `Bash(echo HANDOFF.md)` would falsely satisfy the check. Now anchored.
+- Permission auto-add prompt softened: primary instruction is to tell the user to add manually; the model only attempts the edit if it already has Edit permission for the settings file, since asking at cliff−120 would stall the cache window.
+- Timestamp parser in both hooks now handles non-`Z` timezone offsets: switched from `sub("\\.[0-9]+Z$"; "Z")` (only matched fractional + literal `Z`) to `try (… sub("\\.[0-9]+"; "") | fromdateiso8601) catch 0`. A single malformed entry no longer takes down the whole jq pipeline.
+- 1h-window filter changed from `ts > ($now - 3600)` to `ts >= ($now - 3600)` — the cliff edge itself is now correctly included.
+- `cache-cliff-warn.sh` now defaults `snap_in`/`snap_out`/`cur_in`/`cur_out` to 0 before arithmetic — protects the banner against an empty stats snapshot file produced by a failed jq.
+- `cache-cliff-warn.sh` cleans up an orphaned `ready-sentinel` (and its companion `stats` / `perm-requested` sentinels) when the cliff has already passed — prevents a stale token count or perm-request from a prior cycle from feeding a future banner.
+- `session_id` is sanitized (`tr -cd 'A-Za-z0-9._-' | head -c 64`) before interpolation into `/tmp` paths in both hooks.
 - Tight re-fire loop guard in `cache-cliff-handoff.sh`: when `delay≤0` and the ready-sentinel exists, exit immediately to prevent a re-fire spiral on Stop events past `warn_time`.
 - `systemMessage` JSON construction switched from `printf` (which embedded literal `\n` characters into JSON string values, producing invalid JSON that Claude Code silently discarded) to `jq -n --arg m "$msg" '{"systemMessage": $m}'`.
 

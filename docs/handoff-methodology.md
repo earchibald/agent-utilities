@@ -71,8 +71,8 @@ The asyncRewake handoff was tuned over a series of test cycles using the harness
 
 - **`cost_in` is effectively zero** — full conversation context is served from cache, only the rewake directive itself is novel input. This validates the cache-economics premise: handoff is cheap to generate.
 - **`cost_out` is dominated by the HANDOFF body but contaminated by anything else the model does between fires.** The metric is useful for trend detection (cycle-over-cycle changes) but not for absolute targeting.
-- **Variance pre-hint was 783–4142.** Post-hint we have only one data point (2366), but the file content itself was 459 words — the prompt successfully constrained the body.
-- **Don't over-tune the hint based on `cost_out` alone.** Word-count of HANDOFF.md is the cleaner metric. Future tuning should `wc -w HANDOFF.md` immediately after each cycle and compare against the 800-word target rather than chasing the noisy token delta.
+- **Variance pre-hint was 783–4142.** Post-hint we have only one data point (2366); the post-hint file itself was 459 words. We did not record `wc -w` for cycles 1–3, so we cannot quantify the hint's effect on body size — only that the post-hint body landed under the 800-word target. Treat as "addresses #2, validated by n=1; needs more cycles to claim a real reduction."
+- **Don't over-tune the hint based on `cost_out` alone.** Word-count of HANDOFF.md is the cleaner metric. Future tuning must `wc -w HANDOFF.md` immediately after each cycle and compare against the 800-word target rather than chasing the noisy token delta. Also avoid pairing prompt changes with simultaneous perm-add Edits — cycles 3 and 4 both included perm-add work, confounding the hint's effect.
 
 ### Structural fixes during tuning
 
@@ -83,6 +83,9 @@ These were caught during the tuning runs and shipped before the final cycle:
 | Invalid JSON in `systemMessage` | Banner silently never appeared | `printf` with literal `\n` produced unparseable JSON; switched to `jq -n --arg m "$msg" '{"systemMessage": $m}'` | (early) |
 | Tight re-fire loop | Hook re-armed and re-fired immediately when `delay≤0` | Bail when `delay≤0` and ready-sentinel exists | 469284f |
 | Perm-check double-escape | Banner reported "could not add" for permissions that were in fact added | Switched jq filter from `test($p)` (regex, with `${pattern//./\\\\.}` escaping) to `contains($f)` (plain substring match) | 237e541 |
+| Perm-check too liberal (after first fix) | `contains("HANDOFF.md")` would falsely satisfy from `Read(HANDOFF.md)`, `Bash(echo HANDOFF.md)`, etc. — wrong-tool permissions reported as "already present" | Anchored to exact `Write(<f>)` plus `endswith("/<f>)")` for absolute-path entries | (post-review) |
+| Supersession sentinel cosmetic | When consecutive Stops produced the same `cliff_time` (typical mid-session), the supersession check passed for both predecessor and successor — duplicate suppression silently depended only on the `kill $old_pid` step | Sentinel now encodes `${cliff_time}_${$$}`; predecessor sees mismatch and bails | (post-review) |
+| Timestamp parser brittle | Only `.fffZ` fractional-with-`Z` was normalised; `+00:00`/`-07:00` offsets caused `fromdateiso8601` to error and the whole pipeline to silently no-op | `try (… sub("\\.[0-9]+"; "") \| fromdateiso8601) catch 0` per-row | (post-review) |
 
 ## Operational properties
 
