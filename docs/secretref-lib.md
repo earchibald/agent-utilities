@@ -14,7 +14,7 @@ Currently lives inline in [[wrappers/claude-ds]] between the `BEGIN secretref` a
 | Function | Purpose |
 |---|---|
 | `secretref_resolve <ref>` | Resolve a reference to its secret value on stdout. Main entry point. |
-| `secretref_prompt <label>` | Interactive first-run prompt: asks the user for a reference, transparently handles `system://` keychain reuse-vs-store. Strips surrounding `'`/`"` quotes from input. Uses `read -e` so visible prompts support readline editing (arrow keys, ctrl-a/e, backspace, etc.). When the user types a bare `system://`, runs `secretref_select_account` to pick from existing entries or enter a new one. Echoes the chosen ref. |
+| `secretref_prompt <label>` | Interactive first-run prompt: asks the user for a reference. For `system://` (any input starting with that scheme — trailing account suffixes are ignored), unconditionally runs `secretref_select_account` and persists the result as `system://<chosen-account>`. Strips surrounding `'`/`"` quotes from input. Uses `read -e` so visible prompts support readline editing (arrow keys, ctrl-a/e, backspace, etc.). Echoes the chosen ref. |
 | `secretref_reset_interactive <old_ref> [<label>]` | `--reset-password` flow. If `old_ref` is `system://<acct>`, prompts: [1] change the key for `<acct>` (overwrite the keychain entry), or [2] switch to a different account/scheme — and on (2) asks whether to delete or keep the old keychain entry before re-prompting. For non-system refs, just calls `secretref_reset_local` and re-prompts. Echoes the new ref. |
 | `secretref_reset_local <old_ref>` | Lower-level non-interactive reset: deletes the local secret tied to `old_ref` (only `system://` has one) and logs. Used internally by `secretref_reset_interactive` when no interaction is needed. |
 | `secretref_select_account` | Lists existing accounts under `SECRETREF_KEYCHAIN_SERVICE` and lets the user pick by number, type 'n' for a new name, or type a free-form name. Echoes the chosen account. |
@@ -29,7 +29,7 @@ All public functions write secrets / refs to stdout and prompts / diagnostics to
 | Scheme | Source | Requirements |
 |---|---|---|
 | `op://VAULT/ITEM/FIELD` | 1Password CLI | `op` on `PATH`, signed in via `op signin` |
-| `system://<account>` | OS keychain — macOS `security`, Linux `secret-tool` | `security` (Darwin) or `libsecret-tools` (Linux); service name comes from `SECRETREF_KEYCHAIN_SERVICE` |
+| `system://` | OS keychain — macOS `security`, Linux `secret-tool` | `security` (Darwin) or `libsecret-tools` (Linux); service name comes from `SECRETREF_KEYCHAIN_SERVICE`. Always entered as just `system://` — `secretref_prompt` runs `secretref_select_account` to pick an existing entry or create a new one. The persisted form (in the consumer's config) is `system://<account>`. |
 | `infisical://PROJECT/ENV/PATH#KEY` | Infisical CLI | `infisical` on `PATH`; either `infisical login` once or `INFISICAL_TOKEN` exported. See [[infisical-adapter]] for the adapter's full contract and troubleshooting |
 | _bare key_ | plaintext fallback | none — anything unrecognised is returned verbatim |
 

@@ -54,9 +54,9 @@ For `infisical://` references the wrapper assumes `infisical login` has been run
 
 ### Input affordances
 
-All visible prompts use readline editing (`read -e`) — left/right arrows, ctrl-a/e, backspace, ctrl-w all work as expected. Surrounding `'` or `"` quotes on entered references are stripped (so pasting `"system://default"` from a shell-history line is fine).
+All visible prompts use readline editing (`read -e`) — left/right arrows, ctrl-a/e, backspace, ctrl-w all work as expected. Surrounding `'` or `"` quotes on entered references are stripped (so pasting `"system://"` from a shell-history line is fine).
 
-When you enter a bare `system://` (no account name), the wrapper scans the OS keychain for existing entries under `service='claude-ds'` and presents them as a numbered list, so you can pick an existing account or type a new one. See [[secretref-lib]] (`secretref_select_account`) for the underlying behaviour.
+The `system://` scheme is always entered as just `system://` — any trailing account name the user types is ignored. The wrapper scans the OS keychain for entries under `service='claude-ds'` and presents them as a numbered list (with a `[n]` option for a new account or free-form input). The chosen account is then persisted as `system://<account>` in the config file. This makes the keychain (not the user's typing) the source of truth for which accounts exist, so accidental new entries are harder to create. See [[secretref-lib]] (`secretref_select_account`) for the underlying behaviour.
 
 ## Environment variables set before exec
 

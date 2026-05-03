@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `system://` entry in `secretref_prompt` is now always interactive. Any input starting with `system://` (with or without a trailing account suffix — the suffix is ignored) drops into `secretref_select_account` instead of being accepted directly. The keychain becomes the source of truth for which accounts exist; the chosen account is persisted as `system://<account>` in the consumer's config. Help text and `secretref_help_text` updated to advertise just `system://` rather than `system://<account>`.
 - `--reset-password` in `wrappers/claude-ds` is now a rotation flow rather than a delete-then-reprompt. It hands the old reference to `secretref_reset_interactive`, which handles change-vs-switch interactively, and writes the resulting reference via the new `write_config` helper. The pre-rotation banner now reads "rotating stored API key reference" rather than "clearing".
 - Refactored `wrappers/claude-ds` to embed the secret-handling code as a self-contained reusable library (BEGIN secretref … END secretref). Functions renamed from `resolve_ref` / `keychain_*` / `prompt_for_key`'s body to `secretref_resolve` / `secretref_keychain_*` / `secretref_prompt` / `secretref_help_text` / `secretref_reset_local`. Parameterised via `SECRETREF_KEYCHAIN_SERVICE` (required for `system://`) and `SECRETREF_LOG_PREFIX` (defaults to `secretref`); the wrapper sets both to `claude-ds` and otherwise treats the block as opaque.
 

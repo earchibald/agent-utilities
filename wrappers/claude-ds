@@ -101,14 +101,13 @@ FIRST-RUN BEHAVIOR
   reference and writes:
     ${XDG_CONFIG_HOME:-$HOME/.config}/claude-ds/config   (mode 0600)
 
-  For `system://<account>` references, the prompt checks the OS keychain
-  first: if an entry already exists under service='claude-ds' account=<acct>,
-  it is reused without asking for a key. Otherwise you are prompted for the
-  key and it is stored.
-
-  If you type a bare `system://` (no account), claude-ds scans the OS
-  keychain for existing entries under service='claude-ds' and lets you
-  pick by number, type 'n' to add a new one, or type a free-form name.
+  Typing `system://` (with or without a trailing account name — any
+  trailing input is ignored) drops into an interactive selector that
+  scans the OS keychain for entries under service='claude-ds' and lets
+  you pick one or create a new account. If the chosen account already
+  has a stored secret it is reused; otherwise you are prompted for the
+  key and it is stored. The chosen account is persisted as
+  `system://<account>` in the config file.
 
   Surrounding ' or " quotes on entered references are stripped. All
   visible prompts use readline editing (left/right arrows, ctrl-a/e,
@@ -118,11 +117,15 @@ SUPPORTED SECRET-REFERENCE SCHEMES
   op://VAULT/ITEM/FIELD               1Password CLI (`op read`).
                                       e.g. op://Private/Deepseek/credential
 
-  system://<account>                  OS keychain. macOS `security`, Linux
+  system://                           OS keychain. macOS `security`, Linux
                                       `secret-tool` (install libsecret-tools).
-                                      Service name is always `claude-ds`;
-                                      <account> is the per-key label you
-                                      choose. e.g. system://default
+                                      Service name is always `claude-ds`.
+                                      Type just `system://` — claude-ds
+                                      will list existing entries (if any)
+                                      and let you pick or create one
+                                      interactively. The chosen account is
+                                      persisted as `system://<account>` in
+                                      the config file.
 
   infisical://PROJECT/ENV/PATH#KEY    Infisical CLI (`infisical secrets get`).
                                       Requires `infisical login` once or
@@ -374,11 +377,13 @@ secretref_help_text() {
   op://VAULT/ITEM/FIELD               1Password CLI ('op read').
                                       e.g. op://Private/Service/credential
 
-  system://<account>                  OS keychain. macOS 'security', Linux
+  system://                           OS keychain. macOS 'security', Linux
                                       'secret-tool' (install libsecret-tools).
-                                      Service name: '${SECRETREF_KEYCHAIN_SERVICE:-<unset>}';
-                                      <account> is the per-key label you choose.
-                                      e.g. system://default
+                                      Service name: '${SECRETREF_KEYCHAIN_SERVICE:-<unset>}'.
+                                      Type just 'system://' — claude-ds
+                                      lists existing entries (if any) for
+                                      this service and lets you pick one
+                                      or create a new one interactively.
 
   infisical://PROJECT/ENV/PATH#KEY    Infisical CLI ('infisical secrets get').
                                       Requires 'infisical login' once or
@@ -417,11 +422,13 @@ secretref_prompt() {
 
   if [[ "$ref" == system://* ]]; then
     _secretref_require_service
-    local account="${ref#system://}"
-    if [[ -z "$account" ]]; then
-      account=$(secretref_select_account)
-      ref="system://$account"
-    fi
+    # Any system://… input drops into the interactive selector. We never
+    # accept a free-form `system://<acct>` directly — the selector is the
+    # one source of truth for picking an account, so existing entries are
+    # always surfaced and accidental new accounts are harder to create.
+    local account
+    account=$(secretref_select_account)
+    ref="system://$account"
     if secretref_keychain_lookup "$account" >/dev/null 2>&1; then
       _secretref_log "found existing keychain entry — service='$SECRETREF_KEYCHAIN_SERVICE', account='$account'. Reusing it."
       _secretref_log "to overwrite, re-run with the wrapper's --reset-password flag."
