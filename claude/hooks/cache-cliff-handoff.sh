@@ -119,6 +119,27 @@ if [[ -f "$busy_sentinel" ]]; then
   exit 0
 fi
 
+# Suppress redundant fires:
+#   (a) Rate limit: never fire twice within 10 minutes — banners still fire,
+#       but the HANDOFF body doesn't get rewritten on every cache rotation.
+#   (b) User-activity gate: never rewrite HANDOFF if no new user message has
+#       arrived since the last successful fire — the only intervening event
+#       was our own HANDOFF write, so there's nothing new to brief about.
+fire_ts=$(date +%s)
+current_user_count=$(/usr/bin/jq -rs '[.[] | select(.type=="user")] | length' "$transcript" 2>/dev/null)
+: "${current_user_count:=0}"
+last_fire_file="/tmp/claude-cliff-last-fire-${session_id}"
+if [[ -f "$last_fire_file" ]]; then
+  last_ts=0; last_user_count=0
+  read -r last_ts last_user_count < "$last_fire_file" || true
+  : "${last_ts:=0}" "${last_user_count:=0}"
+  age=$(( fire_ts - last_ts ))
+  user_delta=$(( current_user_count - last_user_count ))
+  if [ "$age" -lt 600 ] || [ "$user_delta" -le 0 ]; then
+    exit 0
+  fi
+fi
+
 cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
   || date -d "@$cliff_time" '+%H:%M' 2>/dev/null \
   || echo "soon")
@@ -155,6 +176,9 @@ done
 rm -f "$pid_file" "$sentinel_file"
 
 echo "$total_m1h" > "$ready_sentinel"
+
+# Record this successful fire for future rate-limit / user-activity checks.
+printf '%s %s\n' "$fire_ts" "$current_user_count" > "$last_fire_file"
 
 # Snapshot cumulative token counts so warn.sh can report the generation delta
 stats_file="/tmp/claude-cliff-stats-${session_id}"
