@@ -19,6 +19,11 @@ cwd=$(       printf '%s' "$input" | /usr/bin/jq -r '.cwd         // empty'     2
 session_id=$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9._-' | head -c 64)
 [[ -z "$session_id" ]] && session_id="default"
 
+# A Stop fired, so the agent has just finished — clear the busy flag so the
+# next UserPromptSubmit (start of next turn) can re-set it cleanly.
+busy_sentinel="/tmp/claude-cliff-busy-${session_id}"
+rm -f "$busy_sentinel"
+
 [[ -z "$transcript" || ! -f "$transcript" ]] && exit 0
 
 now_epoch=$(date +%s)
@@ -104,6 +109,15 @@ ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
 # Bail if superseded by a later Stop event (token mismatch = newer registrant)
 current=$(cat "$sentinel_file" 2>/dev/null || echo "")
 [ "$current" = "$own_token" ] || exit 0
+
+# Bail if the agent is mid-turn — UserPromptSubmit set this flag and no Stop
+# has fired since to clear it. Injecting a rewake directive now would
+# interrupt their flow. Leave a sentinel so warn.sh can surface a "missed
+# cliff" banner on the next Stop — pointing the user at /handoff.
+if [[ -f "$busy_sentinel" ]]; then
+  printf '%s %s\n' "$cliff_time" "$total_m1h" > "/tmp/claude-cliff-skipped-busy-${session_id}"
+  exit 0
+fi
 
 cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
   || date -d "@$cliff_time" '+%H:%M' 2>/dev/null \

@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `claude/hooks/cache-cliff-busy-mark.sh` — `UserPromptSubmit` hook that touches `/tmp/claude-cliff-busy-${session_id}`. Both Stop hooks `rm` it at the top, so the flag persists only for the lifetime of an active turn (UserPromptSubmit → Stop). `cache-cliff-handoff.sh` checks the flag after its sleep and bails with `exit 0` if set — never injects a rewake directive into an in-flight turn.
+- Missed-cliff banner in `cache-cliff-warn.sh`: when `cache-cliff-handoff.sh` bails because the agent was busy, it leaves a `/tmp/claude-cliff-skipped-busy-${session_id}` sentinel encoding the cliff time and token count. On the next Stop, warn.sh emits a `systemMessage` reporting the missed cliff, the burned-cache token count, and prompting the user to run `/handoff` to recover.
+- `claude/commands/handoff.md` — `/handoff` slash command for manual handoff invocation at a clean stopping point. Writes `HANDOFF-${session_id:0:8}.md` to CWD using the same template as the auto rewake directive. Install to `~/.claude/commands/handoff.md` for global availability.
 - Permission auto-detection in `cache-cliff-handoff.sh`: when `Write(HANDOFF.md)` or `Write(HANDOFF-stats.json)` is missing from `~/.claude/settings.json` (global) or `.claude/settings.json` (project), the rewake prompt instructs the model to add it. `cache-cliff-warn.sh` reads a perm-request sentinel and reports add/fail status in the banner.
 - Token-delta tracking: handoff.sh snapshots cumulative input/output tokens before exit; warn.sh diffs against the post-generation transcript and reports `HANDOFF.md generation cost: X in / Y out` in the banner.
 - Test mode via `/tmp/claude-cliff-test-cliff` (epoch file) — both hooks use it to bypass transcript parsing and the 20000-token threshold gate. Test mode also writes `HANDOFF-stats.json` to CWD and touches a banner-fired sentinel for harness consumption.

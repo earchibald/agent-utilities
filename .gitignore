@@ -1,5 +1,5 @@
-HANDOFF.md
-HANDOFF-*.md
-HANDOFF-stats.json
-HANDOFF-stats-*.json
+/HANDOFF.md
+/HANDOFF-*.md
+/HANDOFF-stats.json
+/HANDOFF-stats-*.json
 .claude/

@@ -87,6 +87,18 @@ These were caught during the tuning runs and shipped before the final cycle:
 | Supersession sentinel cosmetic | When consecutive Stops produced the same `cliff_time` (typical mid-session), the supersession check passed for both predecessor and successor — duplicate suppression silently depended only on the `kill $old_pid` step | Sentinel now encodes `${cliff_time}_${$$}`; predecessor sees mismatch and bails | (post-review) |
 | Timestamp parser brittle | Only `.fffZ` fractional-with-`Z` was normalised; `+00:00`/`-07:00` offsets caused `fromdateiso8601` to error and the whole pipeline to silently no-op | `try (… sub("\\.[0-9]+"; "") \| fromdateiso8601) catch 0` per-row | (post-review) |
 
+## Avoiding mid-turn interruption
+
+The asyncRewake mechanism injects a `system-reminder` directive into the model. If it fires while the agent is in the middle of a turn (between `UserPromptSubmit` and `Stop`), the directive interrupts in-progress work — exactly what we don't want.
+
+**Mechanism:** a third hook, `cache-cliff-busy-mark.sh`, is wired to `UserPromptSubmit`. It touches `/tmp/claude-cliff-busy-${session_id}`. Both Stop hooks `rm` this flag at the top of execution. The flag therefore exists exactly during the "agent is currently in a turn" window. After the sleep + supersession check, `cache-cliff-handoff.sh` checks for the flag and bails with `exit 0` if present — never injecting into an in-flight turn.
+
+**Trade-off:** when the cliff arrives during a busy window, the cycle is silently skipped — no HANDOFF for that cliff, the cache eventually has to be re-hydrated. This is the correct trade-off: the cost of one missed cycle is far smaller than the cost of derailing in-progress work.
+
+**Safety net:** `cache-cliff-handoff.sh` writes a `/tmp/claude-cliff-skipped-busy-${session_id}` sentinel encoding the missed cliff time and token count. On the next Stop, `cache-cliff-warn.sh` emits a `systemMessage` reporting the missed cliff and prompting the user to run `/handoff` (the manual slash command) to recover before continuing.
+
+**Manual escape hatch:** the `/handoff` slash command (installed at `~/.claude/commands/handoff.md`) lets the user trigger a handoff write at any clean stopping point — pre-empting the auto fire entirely. Useful before a long break, before `/clear`, or in response to the missed-cliff banner.
+
 ## Operational properties
 
 - **Per-session artifact naming** — each Claude session writes its handoff to `HANDOFF-${session_id:0:8}.md` in the agent's CWD. The banner prints the absolute path so users always know which file goes with which session. In test mode the stats file follows the same convention: `HANDOFF-stats-${session_id:0:8}.json`. This means multiple Claude sessions can run concurrently in the same project without clobbering each other's handoff.

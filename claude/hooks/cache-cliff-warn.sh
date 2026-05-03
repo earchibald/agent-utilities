@@ -11,6 +11,9 @@ cwd=$(       printf '%s' "$input" | /usr/bin/jq -r '.cwd           // empty'    
 session_id=$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9._-' | head -c 64)
 [[ -z "$session_id" ]] && session_id="default"
 
+# Stop fired — clear the busy flag so the next UserPromptSubmit re-sets it.
+rm -f "/tmp/claude-cliff-busy-${session_id}"
+
 [[ -z "$transcript" || ! -f "$transcript" ]] && exit 0
 
 now_epoch=$(date +%s)
@@ -41,6 +44,33 @@ else
 fi
 
 rem=$(( cliff_time - now_epoch ))
+
+# Missed-cliff banner: handoff.sh bailed because the agent was busy. Surface
+# this on the next Stop so the user knows the cache was burned and can run
+# /handoff to recover. Only emit once (sentinel removed after read).
+skipped_sentinel="/tmp/claude-cliff-skipped-busy-${session_id}"
+if [ -f "$skipped_sentinel" ]; then
+  missed_cliff=0; missed_tokens=0
+  read -r missed_cliff missed_tokens < "$skipped_sentinel" || true
+  : "${missed_cliff:=0}" "${missed_tokens:=0}"
+  rm -f "$skipped_sentinel"
+  age=$(( now_epoch - missed_cliff ))
+  # Only report a recent miss (within 10 minutes), and only if the cliff
+  # has actually passed — handoff.sh might have written the sentinel and
+  # then a quick Stop fired before the cliff arrived (rare but possible).
+  if [ "$missed_cliff" -gt 0 ] && [ "$age" -ge 0 ] && [ "$age" -le 600 ]; then
+    missed_hhmm=$(date -r "$missed_cliff" '+%H:%M' 2>/dev/null \
+      || date -d "@$missed_cliff" '+%H:%M' 2>/dev/null \
+      || echo "?")
+    missed_tokens_fmt=$(printf "%'d" "$missed_tokens" 2>/dev/null || echo "$missed_tokens")
+    now_hhmm_local=$(date '+%H:%M')
+    msg2="${now_hhmm_local}: Missed 1h cache cliff at ${missed_hhmm} — agent was busy, handoff was skipped to avoid mid-turn interruption."
+    msg2+=$'\n'"${missed_tokens_fmt} tokens of cache will need to be re-hydrated on the next prompt."
+    msg2+=$'\nRun /handoff now to write the session handoff manually before continuing.'
+    /usr/bin/jq -n --arg m "$msg2" '{"systemMessage": $m}'
+    exit 0
+  fi
+fi
 
 ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
 # If the cliff has already passed, cleanup the orphaned ready-sentinel so a
