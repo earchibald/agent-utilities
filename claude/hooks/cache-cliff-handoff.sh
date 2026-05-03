@@ -66,25 +66,33 @@ min_tokens=${CACHE_CLIFF_MIN_TOKENS:-20000}
 pid_file="/tmp/claude-cliff-handoff-pid-${session_id}"
 sentinel_file="/tmp/claude-cliff-handoff-sentinel-${session_id}"
 
-# Kill previous instance of this hook for this session
-if [[ -f "$pid_file" ]]; then
-  old_pid=$(cat "$pid_file" 2>/dev/null || true)
-  if [[ -n "$old_pid" ]]; then
-    pkill -P "$old_pid" 2>/dev/null || true
-    kill  "$old_pid"  2>/dev/null || true
-  fi
-  rm -f "$pid_file"
+# Atomically replace pid_file and sentinel_file via tmp+mv, so concurrent
+# Stops cannot observe a half-written or rm'd state. Read old PID first.
+old_pid=""
+[[ -f "$pid_file" ]] && old_pid=$(cat "$pid_file" 2>/dev/null || true)
+
+own_token="${cliff_time}_$$"
+printf '%s' "$$"        > "${pid_file}.tmp.$$"      && mv -f "${pid_file}.tmp.$$"      "$pid_file"
+printf '%s' "$own_token" > "${sentinel_file}.tmp.$$" && mv -f "${sentinel_file}.tmp.$$" "$sentinel_file"
+
+# Kill the previous instance now that our registration is committed. A
+# concurrent peer Stop will see our PID/sentinel (post-mv) and quietly bail
+# at the cliff-token check on wake.
+if [[ -n "$old_pid" && "$old_pid" != "$$" ]]; then
+  pkill -P "$old_pid" 2>/dev/null || true
+  kill  "$old_pid"  2>/dev/null || true
 fi
 
-# Register self. Sentinel encodes both cliff_time AND owning PID, so a
-# stale predecessor whose cliff_time is unchanged still detects supersession
-# (cliff_time alone is often stable across consecutive Stops).
-echo "$$"               > "$pid_file"
-own_token="${cliff_time}_$$"
-echo "$own_token"       > "$sentinel_file"
-
-# Ensure sleep child is killed if this process is killed
-trap 'pkill -P $$ 2>/dev/null; exit 0' TERM INT
+# On TERM/INT, kill our sleep child AND remove our pid/sentinel files —
+# otherwise Claude Code timeout / session exit leaks them into /tmp until
+# a future Stop overwrites.
+cleanup() {
+  pkill -P $$ 2>/dev/null || true
+  # Only clean up the sentinel if we still own it (prevents racing a successor)
+  [[ "$(cat "$sentinel_file" 2>/dev/null || echo)" = "$own_token" ]] && rm -f "$sentinel_file" "$pid_file"
+  exit 0
+}
+trap cleanup TERM INT
 
 delay=$(( warn_time - now_epoch ))
 # If we're already past warn_time and the ready-sentinel exists, we already
@@ -101,18 +109,33 @@ cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
   || date -d "@$cliff_time" '+%H:%M' 2>/dev/null \
   || echo "soon")
 
-handoff_path="${cwd:-.}/HANDOFF.md"
+# Per-session artifact: lets multiple Claude sessions share a CWD without
+# clobbering each other's HANDOFF. Banner prints the full path so the user
+# always knows which file goes with which session.
+session_short="${session_id:0:8}"
+handoff_path="${cwd:-.}/HANDOFF-${session_short}.md"
 
-# Check Write permissions for HANDOFF.md and HANDOFF-stats.json
+# Check Write permissions. Look for the wildcard form (Write(HANDOFF-*.md))
+# which covers all sessions, or the exact session-suffixed form. Anchored
+# matches only — substring/contains() would falsely match Read/Bash rules.
 missing_perms=()
-for filename in "HANDOFF.md" "HANDOFF-stats.json"; do
+for pattern in "HANDOFF-*.md" "HANDOFF-stats-*.json"; do
+  exact_session_form="${pattern/\*/$session_short}"
   found=false
   for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
-    if [[ -f "$sf" ]] && /usr/bin/jq -e --arg f "$filename" '(.permissions.allow // [])[] | select(. == "Write(" + $f + ")" or (startswith("Write(") and endswith("/" + $f + ")")))' "$sf" &>/dev/null; then
+    [[ -f "$sf" ]] || continue
+    if /usr/bin/jq -e \
+         --arg wild "$pattern" \
+         --arg exact "$exact_session_form" \
+         '(.permissions.allow // [])[] | select(
+            . == "Write(" + $wild + ")"
+            or . == "Write(" + $exact + ")"
+            or (startswith("Write(") and (endswith("/" + $wild + ")") or endswith("/" + $exact + ")")))
+         )' "$sf" &>/dev/null; then
       found=true; break
     fi
   done
-  $found || missing_perms+=("$filename")
+  $found || missing_perms+=("$pattern")
 done
 
 rm -f "$pid_file" "$sentinel_file"
@@ -134,7 +157,8 @@ if [ "${#missing_perms[@]}" -gt 0 ]; then
   missing_list=$(printf '"Write(%s)" ' "${missing_perms[@]}")
   perm_note="
 ## Permission Setup
-The following Write permissions were not found in ~/.claude/settings.json or .claude/settings.json: ${missing_list}
+The following Write permission patterns were not found in ~/.claude/settings.json or .claude/settings.json: ${missing_list}
+These are wildcard patterns covering all sessions — adding them once gives every future session permission to write its own per-session handoff file.
 Tell the user (in your reply): add these manually to permissions.allow in ~/.claude/settings.json (global, preferred) or .claude/settings.json (project-only).
 Only attempt the edit yourself if you already have Edit permission for the settings file — otherwise asking will stall the cliff window. The next agent session can complete the add."
 else

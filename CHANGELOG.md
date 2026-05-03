@@ -22,6 +22,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Warn timer changed from 60 s to 120 s before cliff (`cliff_time - 120`).
 - Banner text updated: no longer says "session is dead" or instructs `/compact`; instead informs the user that `HANDOFF.md` is ready and suggests `/clear` or `/quit`.
 - HANDOFF.md is now written to the agent's CWD (`cwd` from Stop hook stdin) rather than `~/.claude/`.
+- **Per-session handoff artifacts**: `HANDOFF.md` → `HANDOFF-${session_id:0:8}.md`; in test mode, `HANDOFF-stats.json` → `HANDOFF-stats-${session_id:0:8}.json`. Multiple Claude sessions on the same project no longer overwrite each other's handoff. Permission patterns are now wildcards (`Write(HANDOFF-*.md)` and `Write(HANDOFF-stats-*.json)`) — add once, covers every session. The banner already prints the absolute path, so users always know which file goes with which session. Closes the two-session CWD race (issue #3, B#5).
+- Atomic pid_file/sentinel replacement via tmp + `mv` so concurrent Stops cannot observe a half-written or rm'd state. Predecessor's PID is read before the swap; kill happens after our registration is committed (issue #3, A#2).
+- TERM/INT trap now removes pid_file and sentinel_file (only if the sentinel still encodes our token, to avoid racing a successor) so Claude Code timeout / session exit doesn't leak `/tmp` files (issue #3, B#9).
 
 ### Fixed
 

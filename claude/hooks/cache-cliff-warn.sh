@@ -51,7 +51,8 @@ fi
 if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
   tokens=$(cat "$ready_sentinel" 2>/dev/null || echo "0")
   tokens_fmt=$(printf "%'d" "$tokens" 2>/dev/null || echo "$tokens")
-  handoff_path="${cwd:-.}/HANDOFF.md"
+  session_short="${session_id:0:8}"
+  handoff_path="${cwd:-.}/HANDOFF-${session_short}.md"
   now_hhmm=$(date '+%H:%M')
   cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
     || date -d "@$cliff_time" '+%H:%M' 2>/dev/null \
@@ -63,10 +64,19 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
   if [ -f "$perm_request_sentinel" ]; then
     added=(); failed=()
     while IFS= read -r pattern; do
+      exact_session_form="${pattern/\*/$session_short}"
       found=false
       perm_scope=""
       for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
-        if [[ -f "$sf" ]] && /usr/bin/jq -e --arg f "$pattern" '(.permissions.allow // [])[] | select(. == "Write(" + $f + ")" or (startswith("Write(") and endswith("/" + $f + ")")))' "$sf" &>/dev/null; then
+        [[ -f "$sf" ]] || continue
+        if /usr/bin/jq -e \
+             --arg wild "$pattern" \
+             --arg exact "$exact_session_form" \
+             '(.permissions.allow // [])[] | select(
+                . == "Write(" + $wild + ")"
+                or . == "Write(" + $exact + ")"
+                or (startswith("Write(") and (endswith("/" + $wild + ")") or endswith("/" + $exact + ")")))
+             )' "$sf" &>/dev/null; then
           found=true
           [[ "$sf" == "$HOME/.claude/settings.json" ]] && perm_scope="global" || perm_scope="project"
           break
@@ -99,12 +109,12 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
     d_out=$(( cur_out - snap_out ))
     d_in_fmt=$(printf  "%'d" "$d_in"  2>/dev/null || echo "$d_in")
     d_out_fmt=$(printf "%'d" "$d_out" 2>/dev/null || echo "$d_out")
-    delta_line=$'\nHANDOFF.md generation cost: '"${d_in_fmt} in / ${d_out_fmt} out"
+    delta_line=$'\nHandoff generation cost: '"${d_in_fmt} in / ${d_out_fmt} out"
     rm -f "$stats_file"
   fi
 
   msg="${now_hhmm}: 1h cache batch set to expire in 2m (${tokens_fmt} tokens)."
-  msg+=$'\nHANDOFF.md generated in local directory.'
+  msg+=$'\n'"Handoff written: ${handoff_path}"
   msg+=$'\nConsider /clear or /quit to avoid paying for cache re-hydration.'
   msg+=$'\nAfterwards, prompt: read '"${handoff_path}"' and continue.'
   msg+="$delta_line"
@@ -130,7 +140,7 @@ if [ "$rem" -gt 0 ] && [ "$rem" -le 120 ] && [ -f "$ready_sentinel" ]; then
         handoff_cost_in:  $cost_in,
         handoff_cost_out: $cost_out,
         banner_fired_at:  $banner_fired_at
-      }' > "${cwd:-.}/HANDOFF-stats.json"
+      }' > "${cwd:-.}/HANDOFF-stats-${session_short}.json"
     touch "/tmp/claude-cliff-banner-fired-${session_id}"
   fi
 fi
