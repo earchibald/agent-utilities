@@ -138,6 +138,7 @@ fi
 # system-reminder into the model's context to trigger HANDOFF.md authoring.
 cat <<PROMPT
 The 1h prompt-cache expires at ${cliff_hhmm} (~2m). Write ${handoff_path} now.
+Be concise. Target under 800 words. The next agent is capable — orient them, don't exhaustively document.
 
 This is a directive for the next agent session — not a history summary or compact.
 Write as if briefing a capable replacement who has zero context but full capability.
