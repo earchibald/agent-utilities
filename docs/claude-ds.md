@@ -56,7 +56,17 @@ For `infisical://` references the wrapper assumes `infisical login` has been run
 
 All visible prompts use readline editing (`read -e`) — left/right arrows, ctrl-a/e, backspace, ctrl-w all work as expected. Surrounding `'` or `"` quotes on entered references are stripped (so pasting `"system://"` from a shell-history line is fine).
 
-The `system://` scheme is always entered as just `system://` — any trailing account name the user types is ignored. The wrapper scans the OS keychain for entries under `service='claude-ds'` and presents them as a numbered list (with a `[n]` option for a new account or free-form input). The chosen account is then persisted as `system://<account>` in the config file. This makes the keychain (not the user's typing) the source of truth for which accounts exist, so accidental new entries are harder to create. See [[secretref-lib]] (`secretref_select_account`) for the underlying behaviour.
+**Scheme shorthand.** For the three URI schemes you may drop the `://` and type just `system`, `op`, or `infisical` — the wrapper appends `://` for you.
+
+**`system://` is always interactive.** Any input matching `system://*` (typed suffix is ignored) drops into a numbered selector backed by the OS keychain — pick an existing entry under `service='claude-ds'` or create a new account. The chosen account is persisted as `system://<account>` in the config file. The keychain — not what the user types — is the source of truth for which accounts exist, so typos can't accidentally create new entries.
+
+**`infisical://` has an interactive builder too.** Typing just `infisical://` (or `infisical`) drops into a walkthrough that prompts for project ID, env slug, folder path (default `/`), and secret key, and assembles a complete `infisical://PROJECT/ENV/PATH#KEY` URI. Or paste a complete URI directly — both work.
+
+See [[secretref-lib]] (`secretref_select_account`, `secretref_build_infisical_ref`) for the underlying helpers.
+
+### Output framing
+
+Anything `claude-ds` writes (its `--help`, `--version`, log lines) is separated from the forwarded `claude` output by a blank line and a horizontal rule sized to the terminal width. Makes it easy to tell at a glance which tool produced which line.
 
 ## Environment variables set before exec
 

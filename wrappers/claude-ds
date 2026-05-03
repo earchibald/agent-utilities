@@ -38,6 +38,16 @@ KEYCHAIN_SERVICE="claude-ds"
 DEFAULT_BASE_URL="https://api.deepseek.com/anthropic"
 DEFAULT_MODEL="deepseek-v4-pro"
 
+# Print a horizontal rule sized to the terminal width (fallback 78). Used to
+# separate claude-ds-owned output from forwarded `claude` output.
+print_rule() {
+  local cols
+  cols=$(tput cols 2>/dev/null || echo 78)
+  printf '\n'
+  printf -- '-%.0s' $(seq 1 "$cols")
+  printf '\n\n'
+}
+
 # ---- arg parsing: pull out our flags, forward the rest --------------------
 RESET=0
 PASSTHROUGH=()
@@ -71,7 +81,7 @@ for arg in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
     --version|-V)
       echo "claude-ds $VERSION"
       if command -v claude >/dev/null 2>&1; then
-        printf '  '
+        print_rule
         claude --version 2>&1 || true
       fi
       exit 0
@@ -127,18 +137,25 @@ SUPPORTED SECRET-REFERENCE SCHEMES
                                       persisted as `system://<account>` in
                                       the config file.
 
-  infisical://PROJECT/ENV/PATH#KEY    Infisical CLI (`infisical secrets get`).
-                                      Requires `infisical login` once or
-                                      `INFISICAL_TOKEN` exported in the env.
-                                      PATH is the folder ('/' for root); KEY
-                                      is the secret name as a URI fragment.
+  infisical://  (or just `infisical`) Infisical CLI (`infisical secrets get`).
+                                      Type just `infisical://` to walk an
+                                      interactive builder (project id, env
+                                      slug, path, secret key). Or paste a
+                                      complete URI:
+                                        infisical://PROJECT/ENV/PATH#KEY
                                       e.g. infisical://abc123/prod/#API_KEY
                                       e.g. infisical://abc123/dev/db#PASSWORD
+                                      Requires `infisical login` once or
+                                      `INFISICAL_TOKEN` exported.
 
   <key>                               Bare key — anything that doesn't match
                                       a recognised scheme is treated as
                                       plaintext and written to the config
                                       file as-is.
+
+  Shorthand: for `system`, `op`, and `infisical` you may omit the `://` —
+  it is appended automatically (so typing `infisical` is equivalent to
+  `infisical://` and triggers the interactive builder).
 
 CONFIGURATION
   Config file:  ${XDG_CONFIG_HOME:-$HOME/.config}/claude-ds/config
@@ -150,10 +167,10 @@ CONFIGURATION
     CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1,
     CLAUDE_DISABLE_NONSTREAMING_FALLBACK=1
 
-────────────────────────────────────────────────────────────────────────────
-`claude --help` follows:
-
 EOF
+        print_rule
+        echo "\`claude --help\` follows:"
+        echo
         claude --help 2>&1 || true
       } | eval "$pager"
       exit 0
@@ -270,6 +287,55 @@ _secretref_strip_quotes() {
   printf '%s' "$s"
 }
 
+# Allow bare scheme names without `://` — `system` ≡ `system://`,
+# `op` ≡ `op://`, `infisical` ≡ `infisical://`. Anything else passes through.
+_secretref_canonicalize_scheme() {
+  case "$1" in
+    system|op|infisical) printf '%s://' "$1" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Interactive walkthrough for an `infisical://PROJECT/ENV/PATH#KEY` reference.
+# Prompts for each component, normalizes the path (strips leading/trailing
+# slashes, empty == root), and echoes the constructed URI.
+secretref_build_infisical_ref() {
+  {
+    echo
+    echo "Build an infisical:// reference interactively."
+    echo "  See https://infisical.com/docs/cli/commands/secrets for project/env conventions."
+  } >&2
+  local proj env_slug folder key
+  printf "Project ID: " >&2
+  IFS= read -e -r proj
+  proj=$(_secretref_strip_quotes "$proj")
+  [[ -n "$proj" ]] || _secretref_die "empty project id, aborting."
+
+  printf "Environment slug [dev]: " >&2
+  IFS= read -e -r env_slug
+  env_slug=$(_secretref_strip_quotes "$env_slug")
+  env_slug="${env_slug:-dev}"
+
+  printf "Folder path ('/' for root) [/]: " >&2
+  IFS= read -e -r folder
+  folder=$(_secretref_strip_quotes "$folder")
+  folder="${folder:-/}"
+  # Normalize: strip leading + trailing slashes; empty means root.
+  folder="${folder#/}"
+  folder="${folder%/}"
+
+  printf "Secret key (name of the secret in Infisical): " >&2
+  IFS= read -e -r key
+  key=$(_secretref_strip_quotes "$key")
+  [[ -n "$key" ]] || _secretref_die "empty secret key, aborting."
+
+  if [[ -z "$folder" ]]; then
+    printf 'infisical://%s/%s/#%s' "$proj" "$env_slug" "$key"
+  else
+    printf 'infisical://%s/%s/%s#%s' "$proj" "$env_slug" "$folder" "$key"
+  fi
+}
+
 # Interactive selector for a system:// account name. If existing entries are
 # stored under SECRETREF_KEYCHAIN_SERVICE, presents them as a numbered list
 # and lets the user pick by number, type a free-form new name, or accept the
@@ -377,7 +443,7 @@ secretref_help_text() {
   op://VAULT/ITEM/FIELD               1Password CLI ('op read').
                                       e.g. op://Private/Service/credential
 
-  system://                           OS keychain. macOS 'security', Linux
+  system://  (or just 'system')       OS keychain. macOS 'security', Linux
                                       'secret-tool' (install libsecret-tools).
                                       Service name: '${SECRETREF_KEYCHAIN_SERVICE:-<unset>}'.
                                       Type just 'system://' — claude-ds
@@ -385,17 +451,22 @@ secretref_help_text() {
                                       this service and lets you pick one
                                       or create a new one interactively.
 
-  infisical://PROJECT/ENV/PATH#KEY    Infisical CLI ('infisical secrets get').
+  infisical://  (or just 'infisical') Infisical CLI ('infisical secrets get').
+                                      Type just 'infisical://' to get an
+                                      interactive walkthrough that asks for
+                                      project ID, env slug, folder path,
+                                      and secret key, then builds the full
+                                      URI for you. Or paste a complete URI:
+                                        infisical://PROJECT/ENV/PATH#KEY
                                       Requires 'infisical login' once or
                                       INFISICAL_TOKEN exported in the env.
-                                      PATH is the folder ('/' for root); KEY
-                                      is the secret name as a URI fragment.
-                                      e.g. infisical://abc123/prod/#API_KEY
-                                      e.g. infisical://abc123/dev/db#PASSWORD
 
   <key>                               Bare key — anything not matching a
                                       recognised scheme is treated as
                                       plaintext.
+
+  Note: for 'system', 'op', and 'infisical' you may omit the '://' suffix
+  — the lib appends it automatically.
 EOF
 }
 
@@ -418,7 +489,15 @@ secretref_prompt() {
   local ref
   IFS= read -e -r ref
   ref=$(_secretref_strip_quotes "$ref")
+  ref=$(_secretref_canonicalize_scheme "$ref")
   [[ -n "$ref" ]] || _secretref_die "empty reference, aborting."
+
+  # Bare scheme entries → interactive builders.
+  if [[ "$ref" == "infisical://" ]]; then
+    ref=$(secretref_build_infisical_ref)
+  elif [[ "$ref" == "op://" ]]; then
+    _secretref_die "op:// requires a VAULT/ITEM/FIELD path (e.g. op://Private/Service/credential). No interactive builder is provided for op://; please re-enter."
+  fi
 
   if [[ "$ref" == system://* ]]; then
     _secretref_require_service
@@ -433,7 +512,7 @@ secretref_prompt() {
       _secretref_log "found existing keychain entry — service='$SECRETREF_KEYCHAIN_SERVICE', account='$account'. Reusing it."
       _secretref_log "to overwrite, re-run with the wrapper's --reset-password flag."
     else
-      printf "No existing keychain entry for service='%s' account='%s'. Paste %s (will be stored in %s keychain): " \
+      printf "No existing keychain entry for service='%s' account='%s'.\nPaste %s (will be stored in %s keychain, input hidden):\n> " \
         "$SECRETREF_KEYCHAIN_SERVICE" "$account" "$label" "$(uname -s)" >&2
       local secret
       IFS= read -rs secret
@@ -476,7 +555,7 @@ secretref_reset_interactive() {
     choice=$(_secretref_strip_quotes "$choice")
     case "${choice:-1}" in
       1)
-        printf "Paste new %s for account='%s' (will overwrite %s keychain entry): " \
+        printf "Paste new %s for account='%s' (will overwrite %s keychain entry, input hidden):\n> " \
           "$label" "$old_acct" "$(uname -s)" >&2
         local secret
         IFS= read -rs secret

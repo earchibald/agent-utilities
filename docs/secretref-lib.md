@@ -20,6 +20,8 @@ Currently lives inline in [[wrappers/claude-ds]] between the `BEGIN secretref` a
 | `secretref_select_account` | Lists existing accounts under `SECRETREF_KEYCHAIN_SERVICE` and lets the user pick by number, type 'n' for a new name, or type a free-form name. Echoes the chosen account. |
 | `secretref_keychain_list_accounts` | Enumerates account names already stored under `SECRETREF_KEYCHAIN_SERVICE` (one per line, sorted, unique). macOS: parses `security dump-keychain` (may trigger one keychain-access prompt). Linux: uses `secret-tool search --all`. |
 | `secretref_help_text` | Prints the supported-schemes block (suitable for embedding in a wrapper's `--help`). |
+| `secretref_build_infisical_ref` | Interactive walkthrough that prompts for project ID, env slug, folder path, and secret key, then constructs an `infisical://PROJECT/ENV/PATH#KEY` URI. Triggered automatically when the user enters a bare `infisical://` (or just `infisical`) at the `secretref_prompt`. |
+| `_secretref_canonicalize_scheme` | Internal helper. Lets users type just `system`, `op`, or `infisical` (no `://`) and have it expanded to `system://` etc. Anything else passes through. |
 | `secretref_keychain_{store,lookup,delete}` | Lower-level keychain ops, used by the higher-level functions. Exposed for wrappers that need direct access. |
 
 All public functions write secrets / refs to stdout and prompts / diagnostics to stderr — same convention as `op read`.
@@ -30,8 +32,10 @@ All public functions write secrets / refs to stdout and prompts / diagnostics to
 |---|---|---|
 | `op://VAULT/ITEM/FIELD` | 1Password CLI | `op` on `PATH`, signed in via `op signin` |
 | `system://` | OS keychain — macOS `security`, Linux `secret-tool` | `security` (Darwin) or `libsecret-tools` (Linux); service name comes from `SECRETREF_KEYCHAIN_SERVICE`. Always entered as just `system://` — `secretref_prompt` runs `secretref_select_account` to pick an existing entry or create a new one. The persisted form (in the consumer's config) is `system://<account>`. |
-| `infisical://PROJECT/ENV/PATH#KEY` | Infisical CLI | `infisical` on `PATH`; either `infisical login` once or `INFISICAL_TOKEN` exported. See [[infisical-adapter]] for the adapter's full contract and troubleshooting |
+| `infisical://PROJECT/ENV/PATH#KEY` | Infisical CLI | `infisical` on `PATH`; either `infisical login` once or `INFISICAL_TOKEN` exported. Type just `infisical://` (or `infisical`) to get an interactive walkthrough. See [[infisical-adapter]] for the adapter's full contract and troubleshooting |
 | _bare key_ | plaintext fallback | none — anything unrecognised is returned verbatim |
+
+**Shorthand:** for `system`, `op`, and `infisical` you may omit the `://` — the lib expands `system` → `system://`, etc. So typing just `infisical` is equivalent to `infisical://` and triggers the interactive builder.
 
 ## How to use it in a new wrapper
 
