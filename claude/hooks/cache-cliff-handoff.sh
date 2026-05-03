@@ -92,10 +92,29 @@ cliff_hhmm=$(date -r "$cliff_time" '+%H:%M' 2>/dev/null \
 
 handoff_path="${cwd:-.}/HANDOFF.md"
 
+# Check whether a Write permission covering HANDOFF.md exists in settings
+perm_missing=true
+for sf in "$HOME/.claude/settings.json" "${cwd:-.}/.claude/settings.json"; do
+  if [[ -f "$sf" ]] && /usr/bin/jq -e '(.permissions.allow // [])[] | select(test("HANDOFF\\.md"))' "$sf" &>/dev/null; then
+    perm_missing=false
+    break
+  fi
+done
+
 rm -f "$pid_file" "$sentinel_file"
 
 ready_sentinel="/tmp/claude-cliff-handoff-ready-${session_id}"
 echo "$total_m1h" > "$ready_sentinel"
+
+# Build optional permission note
+perm_note=""
+if $perm_missing; then
+  perm_note='
+## Permission Setup
+No Write permission for HANDOFF.md was found in ~/.claude/settings.json or .claude/settings.json.
+Attempt to add "Write(HANDOFF.md)" to the permissions.allow array in ~/.claude/settings.json (global, preferred).
+If you cannot make that edit, tell the user: add "Write(HANDOFF.md)" to permissions.allow in ~/.claude/settings.json (global) or .claude/settings.json (project-only).'
+fi
 
 # Output the directive prompt — appended to rewakeMessage, injected as
 # system-reminder into the model's context to trigger HANDOFF.md authoring.
@@ -122,6 +141,7 @@ Specific ordered steps the next agent should execute immediately on reading this
 Non-obvious constraints, conventions, gotchas, or background knowledge that was hard-won this session and must not be lost.
 
 Write the file now. Output only the absolute path when done.
+${perm_note}
 PROMPT
 
 exit 2
