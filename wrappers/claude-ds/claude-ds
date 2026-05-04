@@ -31,7 +31,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-ds"
 CONFIG_FILE="$CONFIG_DIR/config"
 KEYCHAIN_SERVICE="claude-ds"
@@ -762,6 +762,7 @@ token=$(secretref_resolve "$api_key_ref") || { echo "claude-ds: failed to resolv
 [[ -n "$token" ]] || { echo "claude-ds: resolved API key is empty ($api_key_ref)" >&2; exit 1; }
 
 # ---- exec claude -----------------------------------------------------------
+export CLAUDE_DS=1
 export ANTHROPIC_BASE_URL="${base_url:-$DEFAULT_BASE_URL}"
 export ANTHROPIC_AUTH_TOKEN="$token"
 
@@ -826,6 +827,83 @@ fi
 
 export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
 export CLAUDE_DISABLE_NONSTREAMING_FALLBACK=1
+
+# ---- visual branding (tmux only) ------------------------------------------
+# When running inside tmux, decorate the *pane* (not the status line!) so the
+# user can tell at a glance that this window is a DeepSeek-backed claude even
+# though the model ids advertised to claude pretend to be Anthropic. Uses
+# pane-scoped tmux options (`set -p`), which are cleared automatically when
+# the pane dies — no exit trap needed. DeepSeek's brand color is #4D6BFE
+# (electric indigo); the whale glyph is their wordmark icon.
+#
+# Skip with CLAUDE_DS_NO_BRANDING=1 (e.g. for headless `claude -p` calls
+# where the border noise just steals a row of pane height for nothing).
+if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" && -z "${CLAUDE_DS_NO_BRANDING:-}" ]]; then
+  # DeepSeek brand color (#4D6BFE — electric indigo). The border itself uses
+  # heavy line-drawing characters; the label renders as a solid indigo badge
+  # with white bold text so it reads at a glance from across the screen.
+  ds_brand_color="#4D6BFE"
+  ds_brand_text="🐋 DEEPSEEK"
+  ds_brand_detail="model: ${resolved_model}"
+  if [[ "${unlock_auto_mode:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    ds_brand_detail+=" · wire id: ${ANTHROPIC_MODEL} (spoofed for auto-mode)"
+  fi
+  # `#[…]` segments are tmux's inline-style markers — flip background/fg for
+  # the badge, then `default` resets to the border's own style for the rest.
+  ds_brand_format="#[bg=${ds_brand_color},fg=#FFFFFF,bold] ${ds_brand_text} #[default] ${ds_brand_detail} "
+
+  # `pane-border-status` and the border styles are *window* options, not
+  # pane options — `set -p` silently rejects them. Resolve $TMUX_PANE to its
+  # window-id (which doesn't change even if the user focuses elsewhere
+  # mid-launch) and use `set -w`.
+  ds_brand_window=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null || echo "")
+  if [[ -n "$ds_brand_window" ]]; then
+    # Window name marker — always visible in the tmux window-list (which
+    # lives in tmux's status bar, separate from claude's TUI statusline).
+    # Disable automatic-rename so claude's "running command" doesn't
+    # immediately overwrite our prefix. Save original for restoration.
+    ds_brand_orig_name=$(tmux display-message -p -t "$ds_brand_window" '#{window_name}' 2>/dev/null || echo "")
+    # Strip existing 🐋 prefix so we don't double up (e.g. when
+    # the window was created with `tmux new-window -n "🐋 …"`).
+    ds_brand_clean_name="${ds_brand_orig_name#"🐋 "}"
+    ds_brand_clean_name="${ds_brand_clean_name#"🐋"}"
+    ds_brand_orig_autorename=$(tmux show -wv -t "$ds_brand_window" automatic-rename 2>/dev/null || echo "")
+    tmux set -w -t "$ds_brand_window" automatic-rename off                                                2>/dev/null || true
+    tmux rename-window -t "$ds_brand_window" "🐋 ${ds_brand_clean_name:-claude-ds}"                        2>/dev/null || true
+
+    # Pane-border decoration — the visually loud bit, but only renders when
+    # the user's terminal/tmux supports pane-border-status (most do).
+    tmux set -w -t "$ds_brand_window" pane-border-status top                                              2>/dev/null || true
+    tmux set -w -t "$ds_brand_window" pane-border-lines heavy                                             2>/dev/null || true
+    tmux set -w -t "$ds_brand_window" pane-border-style "fg=${ds_brand_color},bg=default,bold"            2>/dev/null || true
+    tmux set -w -t "$ds_brand_window" pane-active-border-style "fg=${ds_brand_color},bg=default,bold"     2>/dev/null || true
+    tmux set -w -t "$ds_brand_window" pane-border-format "$ds_brand_format"                               2>/dev/null || true
+
+    # Window-scope options outlive the pane, so restore on exit when the
+    # window is multi-pane. Single-pane windows die with the wrapper and
+    # take their options with them — but the window NAME deserves restoring
+    # in both cases (otherwise re-launching in the same window leaves a
+    # stale 🐋 prefix even after a crash).
+    trap '
+      pane_count=$(tmux display-message -p -t "$ds_brand_window" "#{window_panes}" 2>/dev/null || echo 1)
+      if [[ -n "$ds_brand_orig_name" ]]; then
+        tmux rename-window -t "$ds_brand_window" "$ds_brand_orig_name" 2>/dev/null || true
+      fi
+      if [[ -n "$ds_brand_orig_autorename" ]]; then
+        tmux set -w -t "$ds_brand_window" automatic-rename "$ds_brand_orig_autorename" 2>/dev/null || true
+      else
+        tmux set -wu -t "$ds_brand_window" automatic-rename 2>/dev/null || true
+      fi
+      if [[ "$pane_count" -gt 1 ]]; then
+        tmux set -wu -t "$ds_brand_window" pane-border-status        2>/dev/null || true
+        tmux set -wu -t "$ds_brand_window" pane-border-lines         2>/dev/null || true
+        tmux set -wu -t "$ds_brand_window" pane-border-style         2>/dev/null || true
+        tmux set -wu -t "$ds_brand_window" pane-active-border-style  2>/dev/null || true
+        tmux set -wu -t "$ds_brand_window" pane-border-format        2>/dev/null || true
+      fi
+    ' EXIT
+  fi
+fi
 
 # Separator between any claude-ds-owned output above and forwarded claude
 # output below. (Interactive TUI invocations of claude clear the screen, so

@@ -92,6 +92,49 @@ The two `CLAUDE_*` flags are required because DeepSeek's Anthropic-compat layer 
 
 **`capabilities=`.** Comma-separated list, e.g. `effort,thinking,adaptive_thinking,interleaved_thinking`. When set, the matching `*_SUPPORTED_CAPABILITIES` env vars are exported for all three tiers so `claude` doesn't strip features it can't auto-detect on a non-canonical model ID. Leave unset for DeepSeek's vanilla compat shim — opt in only if your gateway actually implements the feature.
 
+## Visual branding (tmux)
+
+When `claude-ds` is launched inside tmux, it decorates the pane and window so a DeepSeek-backed claude can be told apart at a glance from a real Anthropic claude — useful when `unlock_auto_mode=1` is making the model id pretend to be `claude-opus-4-7`.
+
+Three visible markers, in increasing reliability:
+
+1. **Window-name 🐋 prefix** — `automatic-rename` is turned off and the window is renamed to `🐋 <original-name>`. Always shows in tmux's window list (status bar). Bypasses any terminal contrast quirks since emoji glyphs aren't color-styled by tmux. Restored on clean exit.
+2. **Heavy indigo top-of-pane border** with a `🐋 DEEPSEEK · model: <real> · wire id: <spoofed>` badge. Renders only when your terminal supports tmux's `pane-border-status` (most modern terminals do).
+3. **Color** is the DeepSeek brand `#4D6BFE` (electric indigo) — bold white text on a solid indigo badge for the label, indigo border lines for the rest.
+
+Skip the entire decoration with `CLAUDE_DS_NO_BRANDING=1` (e.g. for headless `claude -p` calls where the border eats a row of pane height for nothing).
+
+### Recommended tmux + iTerm setup for testing visual branding
+
+If the pane-border badge looks washed-out or invisible, two things to check:
+
+**1. Truecolor passthrough.** Without it, the indigo `#4D6BFE` falls back to whatever the nearest 256-color palette entry is and may collide with your border default. Add to `~/.tmux.conf`:
+
+```tmux
+set -g default-terminal "tmux-256color"
+set -ga terminal-features ",xterm-256color:RGB"
+set -ga terminal-features ",iTerm.app:RGB"
+```
+
+(Adjust the second matcher to whatever `$TERM` your terminal sets — `tmux display-message -p '#{client_termtype}'` shows the upstream terminal type.)
+
+**2. iTerm2 minimum-contrast.** iTerm has a per-profile *Minimum Contrast* slider (Profiles → Colors). At anything above 0 it silently nudges fg/bg pairs apart for legibility, which can drift the indigo badge background toward your terminal background until it disappears. Drop it to 0 (or close to it) for the testing profile.
+
+**3. Forward the tmux pane title to your terminal-window title bar** so the 🐋 marker is visible in the window list of macOS / your tab bar even when tmux is full-screen:
+
+```tmux
+# Allow tmux to set the terminal title
+set-option -g set-titles on
+
+# Set the window/tab title format
+# #T = standard pane title
+# #W = tmux window name (if you prefer what you set with `prefix + ,`)
+# #S = tmux session name
+set-option -g set-titles-string '#T'
+```
+
+Use `#W` instead of `#T` if you want claude-ds's `🐋` window-name prefix to land in the terminal's title bar (which is usually what you want for a "tag the whole window" effect — `#T` shows the pane's program-set title, which claude doesn't customize).
+
 ## Troubleshooting
 
 - **"failed to resolve API key from \<ref\>"** — the resolver failed. Check the per-scheme requirements in [[secretref-lib]]; for `infisical://` specifically, walk the checklist in [[infisical-adapter]].
