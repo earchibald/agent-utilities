@@ -73,11 +73,15 @@ print_rule() {
 # ---- arg parsing: pull out our flags, forward the rest --------------------
 RESET=0
 DOCTOR=0
+PROXY_OVERRIDE=""
 PASSTHROUGH=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --reset-password|--rotate-key) RESET=1 ;;
     --doctor)                      DOCTOR=1 ;;
+    --proxy-off)                   PROXY_OVERRIDE="off" ;;
+    --proxy-on)                    PROXY_OVERRIDE="auto" ;;
+    --proxy-on=*)                  PROXY_OVERRIDE="${1#--proxy-on=}" ;;
     --) shift; PASSTHROUGH+=("$@"); break ;;
     *) PASSTHROUGH+=("$1") ;;
   esac
@@ -121,8 +125,8 @@ for arg in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
 claude-ds — wrapper that runs `claude` against DeepSeek's Anthropic-compatible API.
 
 USAGE
-  claude-ds [--rotate-key | --reset-password] [--doctor]
-            [--help | -h] [--version | -V] [claude args...]
+  claude-ds [--rotate-key | --reset-password] [--proxy-off | --proxy-on[=<spec>]]
+            [--doctor] [--help | -h] [--version | -V] [claude args...]
 
 claude-ds-specific flags
   --rotate-key,
@@ -134,6 +138,12 @@ claude-ds-specific flags
                       forgets the local reference (upstream stores are
                       never touched). The new key is liveness-checked
                       against the configured base_url before saving.
+  --proxy-off         Disable the reasoning-effort proxy for this session.
+                      Overrides both config file and env var.
+  --proxy-on[=<spec>] Enable the reasoning-effort proxy for this session.
+                      Default spec is `auto`; provide a custom spec after
+                      `=` (e.g. `--proxy-on=auto:max`) for one-shot use.
+                      Overrides both config file and env var.
   --doctor            Run end-to-end diagnostics: claude on PATH, python3
                       available, proxy script present, config readable
                       and validated, secret reference resolvable, API key
@@ -210,46 +220,71 @@ CONFIGURATION
                 model_{opus,sonnet,haiku,small_fast} = <model>
                 capabilities = (unset; opt-in)
                 unlock_auto_mode = (unset; opt-in)
-                proxy_effort = auto    (auto-derive from claude's thinking)
+                proxy_effort = off     (proxy disabled by default — enable with `auto` or a spec)
                 proxy_effort_<tier> = (unset; falls through to proxy_effort)
                 proxy_bind = 127.0.0.1
                 proxy_debug = 0
 
 REASONING-EFFORT PROXY
-  DeepSeek's compat shim recognises three reasoning regimes:
+  DeepSeek's compat shim recognises only three reasoning regimes:
     none    — `thinking` block ABSENT, no `reasoning_effort`. No reasoning.
-    high    — `thinking: {type:enabled}` PRESENT, no reasoning_effort
-              (or =high — same wire effect). DeepSeek's default depth.
-    max     — `thinking` PRESENT *and* `reasoning_effort=max`. Maximum.
-  Anthropic's wire format uses `thinking.budget_tokens` (an integer).
-  claude-ds spawns a small local proxy that translates between them and
-  collapses any caller-supplied Anthropic levels (low/medium/xhigh/etc.)
-  onto the three regimes above, since DeepSeek would otherwise reject
-  them.
+    high    — `thinking: {type: enabled}` PRESENT, no `reasoning_effort`.
+              DeepSeek's default reasoning depth.
+    max     — `thinking` PRESENT AND `reasoning_effort=max`. Maximum depth.
 
-  Auto-bucket (`proxy_effort=auto`):
-    no thinking block        → "none"  (no reasoning)
-    thinking, budget <  31k  → "high"  (default reasoning)
-    thinking, budget >= 31k  → "max"   (ultrathink → maximum reasoning)
+  Anthropic's wire format uses `thinking.budget_tokens` (an integer).
+  Claude Code has its own `/effort` levels (low/medium/high/xhigh/max)
+  that it translates into `thinking.budget_tokens` — but DeepSeek does
+  NOT understand most of these levels and would reject them. The claude-ds
+  proxy bridges this gap by translating Claude's wire format into one
+  of DeepSeek's three regimes.
+
+  ┌──────────────────────────────────────────────────────────────────┐
+  │              Claude → DeepSeek effort mapping                    │
+  ├─────────────────────────┬────────────────────────────────────────┤
+  │  Claude `/effort` level │  DS regime (proxy_effort=auto)         │
+  ├─────────────────────────┼────────────────────────────────────────┤
+  │  off (no thinking)      │  none — no reasoning tokens            │
+  │  low                    │  high — default reasoning              │
+  │  medium                 │  high — default reasoning              │
+  │  high                   │  high — default reasoning              │
+  │  extra-high (xhigh)     │  max  — maximum reasoning              │
+  │  max                    │  max  — maximum reasoning              │
+  └─────────────────────────┴────────────────────────────────────────┘
+
+  The proxy determines which source bucket a request falls into based
+  on `thinking.budget_tokens`:
+    budget absent or `type: disabled`  → "none"  (no reasoning)
+    budget present, value < 31k        → "high"  (default reasoning)
+    budget present, value >= 31k       → "max"   (maximum reasoning)
+
+  Recommended config:
+    proxy_effort=auto               # enable + auto-bucket
+    proxy_effort_small_fast=none    # never reason on the cheap tier
 
   Per-tier overrides bind a spec to the *wire-level* model id of that
   tier (the value of ANTHROPIC_DEFAULT_<TIER>_MODEL). Tier specs are
-  applied small_fast → haiku → sonnet → opus, so opus wins on wire-id
-  collisions; if a real collision is detected at startup, claude-ds
+  applied in order small_fast → haiku → sonnet → opus, so opus wins on
+  wire-id collisions. If a collision is detected at startup, claude-ds
   prints a one-line linter warning naming the colliding tiers.
 
-  Spec language (config value):
-    auto             — derive regime from claude's thinking block (default)
-    auto:<level>     — same, but use <level> when claude sends no thinking
-                       (e.g. `auto:high` → always at least default reasoning;
-                       `auto:max` → always max reasoning when claude is silent)
+  Spec language (config value of proxy_effort or proxy_effort_<tier>):
+    auto             — derive regime from claude's thinking (see table)
+    auto:<level>     — same with fallback when claude sends no thinking
+                       (e.g. `auto:high` → always at least default depth;
+                       `auto:max` → always max reasoning)
     off              — pass the body through unchanged for this model
     none             — strip thinking, return non-reasoning response
-    high             — ensure thinking is enabled (no reasoning_effort)
-    max              — ensure thinking + reasoning_effort=max
+    high             — force thinking enabled (no reasoning_effort)
+    max              — force thinking + reasoning_effort=max
     none=<v>|high=<v>|max=<v>
-                     — full per-source-bucket matrix; clauses are optional,
-                       unlisted buckets pass through unchanged
+                     — per-source-bucket matrix. Each clause maps a
+                       source bucket to a target regime; unlisted buckets
+                       pass through unchanged.
+                       Example: `none=high|high=max|max=max` means
+                       "no thinking → high; thinking <31k → max;
+                       thinking >=31k → max" (i.e. always at least high,
+                       and any thinking-enabled request gets max).
 
   Disable the proxy entirely by setting `proxy_effort=off` and leaving
   every per-tier `proxy_effort_*` unset (or off). Then claude talks to
@@ -257,7 +292,7 @@ REASONING-EFFORT PROXY
 
   Env-var overrides (one-shot, no config edit):
     CLAUDE_DS_PROXY_EFFORT=off       skip the proxy for this invocation
-    CLAUDE_DS_PROXY_DEBUG=1          log injections to stderr
+    CLAUDE_DS_PROXY_DEBUG=1          log regime injections to stderr
 
 UNLOCKING AUTO MODE (--auto / permission classifier)
   Claude Code's "auto mode" — the permission classifier that auto-approves
@@ -1082,16 +1117,16 @@ write_config() {
     printf '#   high    — thinking enabled, no reasoning_effort  (default depth)\n'
     printf '#   max     — thinking enabled + reasoning_effort=max  (max depth)\n'
     printf '#\n'
-    printf '# claude already sets `thinking` correctly for its native\n'
-    printf '# /think, /think-hard, /ultrathink commands, which DeepSeek maps to\n'
-    printf '# `high` natively — so for normal use the proxy adds nothing.\n'
-    printf '# Enable it only when you want to FORCE a specific regime regardless\n'
-    printf '# of what claude requests (e.g. always-max for tough work, always-\n'
-    printf '# none to save tokens, or per-tier knobs).\n'
+    printf '# Claude Code uses /effort levels (low/medium/high/xhigh/max) that\n'
+    printf '# DeepSeek does NOT understand natively — it would reject them.\n'
+    printf '# The proxy translates Claude level(s) into DeepSeek regimes:\n'
+    printf '#     low/medium/high → DeepSeek high  (default reasoning)\n'
+    printf '#     xhigh/max       → DeepSeek max   (maximum reasoning)\n'
+    printf '# Standard config: proxy_effort=auto + proxy_effort_small_fast=none\n'
     printf '#\n'
     printf '# Spec language for proxy_effort and proxy_effort_<tier>:\n'
     printf '#   off            — passthrough; do not modify the request (default)\n'
-    printf '#   auto           — derive regime from claude'\''s thinking block\n'
+    printf '#   auto           — derive regime from claude'\''s effort levels\n'
     printf '#   auto:<level>   — like auto, but force <level> when claude sends\n'
     printf '#                    no thinking block. e.g. `auto:high` forces\n'
     printf '#                    thinking on every request.\n'
@@ -1099,13 +1134,15 @@ write_config() {
     printf '#   high           — ensure thinking enabled, default reasoning\n'
     printf '#   max            — ensure thinking + reasoning_effort=max\n'
     printf '#   none=<v>|high=<v>|max=<v>\n'
-    printf '#                  — full per-source-bucket matrix\n'
+    printf '#                  — full per-source-bucket matrix (override the\n'
+    printf '#                    mapping: none=high|high=max|max=max means\n'
+    printf '#                    "always reason when thinking is enabled")\n'
     printf '#\n'
     printf 'proxy_effort=%s\n'          "$proxy_choice"
     printf '# proxy_effort_opus=max         # always max on the opus tier\n'
     printf '# proxy_effort_sonnet=auto:high # sonnet thinks at minimum\n'
     printf '# proxy_effort_haiku=off        # let DeepSeek decide for haiku\n'
-    printf '# proxy_effort_small_fast=none  # never reason on the fast tier\n'
+    printf '# proxy_effort_small_fast=none  # never reason on the cheap tier\n'
     printf '#\n'
     printf '# proxy_bind=127.0.0.1\n'
     printf '# proxy_debug=0   # 1 → log every regime application to stderr\n'
@@ -1290,6 +1327,14 @@ done < "$CONFIG_FILE"
 # Env-var overrides (useful for one-off invocations without editing config):
 [[ -n "${CLAUDE_DS_PROXY_EFFORT:-}" ]] && proxy_effort="$CLAUDE_DS_PROXY_EFFORT"
 [[ -n "${CLAUDE_DS_PROXY_DEBUG:-}" ]]  && proxy_debug="$CLAUDE_DS_PROXY_DEBUG"
+
+# CLI flag overrides (--proxy-on / --proxy-off). Takes precedence over both
+# config file and env var, since it's the most explicit per-invocation signal.
+case "${PROXY_OVERRIDE}" in
+  "") ;;  # no override
+  off) proxy_effort="off" ;;
+  *)   proxy_effort="$PROXY_OVERRIDE" ;;  # "auto" or custom spec
+esac
 
 [[ -n "$api_key_ref" ]] || { echo "claude-ds: config missing api_key_ref; rerun with --reset-password or --rotate-key" >&2; exit 1; }
 
@@ -1749,7 +1794,16 @@ Your underlying model is \`${resolved_model:-deepseek-v4-pro}\`.
 
 **Auto mode** (\`unlock_auto_mode=1\`): Spoofs \`claude-opus-4-7\`/etc. model ids so Claude Code's permission classifier activates. \`/model\` picker shows real DeepSeek labels. Does NOT change which model actually serves requests.
 
-**Reasoning proxy** (\`proxy_effort\`, off by default): Translates \`thinking.budget_tokens\` into DeepSeek's \`reasoning_effort\` — 3 regimes: \`none\` (strip thinking), \`high\` (default depth), \`max\` (maximum). Per-tier via \`proxy_effort_{opus,sonnet,haiku,small_fast}\`. One-shot disable: \`CLAUDE_DS_PROXY_EFFORT=off\`.
+**Reasoning proxy** (\`proxy_effort\`, off by default): Translates Claude's
+\`/effort\` levels into DeepSeek \`reasoning_effort\`. With \`proxy_effort=auto\`:
+  low/medium/high → DeepSeek \`high\` (default reasoning)
+  xhigh/max       → DeepSeek \`max\`  (maximum reasoning)
+  no thinking     → \`none\` (no reasoning tokens)
+  Standard config: \`proxy_effort=auto\` + \`proxy_effort_small_fast=none\`.
+Override the mapping via matrix syntax: \`none=<v>|high=<v>|max=<v>\`.
+Per-tier: \`proxy_effort_{opus,sonnet,haiku,small_fast}\`.
+One-shot disable: \`CLAUDE_DS_PROXY_EFFORT=off\`.
+Debug: \`CLAUDE_DS_PROXY_DEBUG=1\`.
 
 **Self-healing**: Schema auto-migrated on version bumps (\`<config>.v<N>.bak\` backed up). Damaged configs detected, backed up (\`<config>.broken.<ts>.bak\`), and repaired — no data lost. Missing proxy script lazy-fetched; absent curl/python3 soft-fallbacks (proxy off, config untouched).
 

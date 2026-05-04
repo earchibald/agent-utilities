@@ -21,6 +21,12 @@
 #                budget_tokens preserved if present), strip `reasoning_effort`
 #   level=max  → ensure `thinking: {type: enabled}`, set `reasoning_effort=max`
 #
+# Claude → DeepSeek mapping (proxy_effort=auto):
+#   Claude off (no thinking)     → none (no reasoning tokens)
+#   Claude low/medium/high       → high (DeepSeek default reasoning)
+#   Claude extra-high / max      → max  (DeepSeek maximum reasoning)
+#   small_fast tier (always)     → none (strip thinking — saves tokens)
+#
 # Configuration via environment variables (set by the wrapper):
 #   UPSTREAM_BASE_URL   required. e.g. https://api.deepseek.com/anthropic
 #   PROXY_BIND          default 127.0.0.1
