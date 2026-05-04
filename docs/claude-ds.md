@@ -20,8 +20,9 @@ The wrapper itself is small. Most of the file is the embedded [[secretref-lib]] 
 | | |
 |---|---|
 | Config file | `${XDG_CONFIG_HOME:-$HOME/.config}/claude-ds/config` (mode 0600) |
-| Keys | `api_key_ref`, `model`, `base_url` |
-| Defaults | `model=deepseek-v4-pro`, `base_url=https://api.deepseek.com/anthropic` |
+| Keys | `api_key_ref`, `base_url`, `model`, `model_opus`, `model_sonnet`, `model_haiku`, `model_small_fast`, `capabilities` |
+| Defaults | `base_url=https://api.deepseek.com/anthropic`, `model=deepseek-v4-pro`, all `model_*` keys default to `model`, `capabilities` unset |
+| Comments | Lines whose key starts with `#` are ignored. `write_config` writes the per-tier `model_*` keys and `capabilities` commented out by default — uncomment to override. |
 | Keychain service | `claude-ds` (when using `system://` refs) |
 
 ## First run
@@ -71,14 +72,25 @@ Anything `claude-ds` writes (its `--help`, `--version`, log lines) is separated 
 ## Environment variables set before exec
 
 ```
-ANTHROPIC_BASE_URL                       (from base_url config; default DeepSeek endpoint)
-ANTHROPIC_AUTH_TOKEN                     (resolved from api_key_ref)
-ANTHROPIC_MODEL                          (from model config; default deepseek-v4-pro)
+ANTHROPIC_BASE_URL                                          (from base_url; default DeepSeek endpoint)
+ANTHROPIC_AUTH_TOKEN                                        (resolved from api_key_ref)
+ANTHROPIC_MODEL                                             (from model; default deepseek-v4-pro)
+ANTHROPIC_DEFAULT_OPUS_MODEL                                (from model_opus; defaults to model)
+ANTHROPIC_DEFAULT_SONNET_MODEL                              (from model_sonnet; defaults to model)
+ANTHROPIC_DEFAULT_HAIKU_MODEL                               (from model_haiku; defaults to model)
+ANTHROPIC_SMALL_FAST_MODEL                                  (from model_small_fast; defaults to model)
+ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES         (only when capabilities= is set)
+ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES       (only when capabilities= is set)
+ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES        (only when capabilities= is set)
 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
 CLAUDE_DISABLE_NONSTREAMING_FALLBACK=1
 ```
 
 The two `CLAUDE_*` flags are required because DeepSeek's Anthropic-compat layer doesn't implement experimental beta headers or non-streaming fallback semantics.
+
+**Why the four `*_MODEL` tier vars?** Claude Code's "auto" / `/model default` routing is what selects between Opus, Sonnet, and Haiku per task. When `ANTHROPIC_BASE_URL` points at a non-Anthropic gateway (DeepSeek, in this case), that routing is gated behind the `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` env vars — without them, auto mode silently no-ops. DeepSeek is single-tier, so all four point at the same model by default; override individually via the `model_*` config keys if your gateway exposes more than one tier.
+
+**`capabilities=`.** Comma-separated list, e.g. `effort,thinking,adaptive_thinking,interleaved_thinking`. When set, the matching `*_SUPPORTED_CAPABILITIES` env vars are exported for all three tiers so `claude` doesn't strip features it can't auto-detect on a non-canonical model ID. Leave unset for DeepSeek's vanilla compat shim — opt in only if your gateway actually implements the feature.
 
 ## Troubleshooting
 

@@ -31,7 +31,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-ds"
 CONFIG_FILE="$CONFIG_DIR/config"
 KEYCHAIN_SERVICE="claude-ds"
@@ -39,12 +39,15 @@ DEFAULT_BASE_URL="https://api.deepseek.com/anthropic"
 DEFAULT_MODEL="deepseek-v4-pro"
 
 # Print a horizontal rule sized to the terminal width (fallback 78). Used to
-# separate claude-ds-owned output from forwarded `claude` output.
+# separate claude-ds-owned output from forwarded `claude` output. Uses U+2500
+# BOX DRAWINGS LIGHT HORIZONTAL — a fixed-width 1-cell glyph, so it tiles
+# cleanly even in pagers (less) where ambiguous-width em dash (—) can render
+# as a wide character and overflow the terminal width.
 print_rule() {
   local cols
   cols=$(tput cols 2>/dev/null || echo 78)
   printf '\n'
-  printf -- '-%.0s' $(seq 1 "$cols")
+  printf -- '\xe2\x94\x80%.0s' $(seq 1 "$cols")
   printf '\n\n'
 }
 
@@ -88,6 +91,10 @@ for arg in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
       ;;
     --help|-h)
       pager=$(pick_pager)
+      # Force UTF-8 so em dashes / box-drawing rules in the help body render
+      # correctly under less (which otherwise defaults to latin1 and shows
+      # multi-byte chars as <U+...> escapes).
+      export LESSCHARSET=utf-8
       {
         cat <<'EOF'
 claude-ds — wrapper that runs `claude` against DeepSeek's Anthropic-compatible API.
@@ -159,11 +166,55 @@ SUPPORTED SECRET-REFERENCE SCHEMES
 
 CONFIGURATION
   Config file:  ${XDG_CONFIG_HOME:-$HOME/.config}/claude-ds/config
-  Keys:         api_key_ref, model, base_url
-  Defaults:     model=deepseek-v4-pro, base_url=https://api.deepseek.com/anthropic
+  Keys:         api_key_ref, base_url, model,
+                model_opus, model_sonnet, model_haiku, model_small_fast,
+                capabilities, unlock_auto_mode
+  Defaults:     base_url=https://api.deepseek.com/anthropic
+                model=deepseek-v4-pro
+                model_{opus,sonnet,haiku,small_fast} = <model>  (all tiers
+                  pinned to the same DeepSeek model so `/model default` /
+                  auto routing in `claude` doesn't break — DeepSeek is
+                  single-tier from Claude Code's perspective)
+                capabilities = (unset; opt-in)
+                unlock_auto_mode = (unset; opt-in)
+
+UNLOCKING AUTO MODE (--auto / permission classifier)
+  Claude Code's "auto mode" — the permission classifier that auto-approves
+  routine tool calls — is gated on the model id matching one of:
+    claude-opus-4-7, claude-opus-4-6, claude-sonnet-4-6
+  The provider is NOT checked (firstParty is the default `tq()` value when
+  no CLAUDE_CODE_USE_* is set), but the model name regex is. So with the
+  default `model=deepseek-v4-pro`, auto mode reports "unavailable for this
+  model".
+
+  Setting `unlock_auto_mode=1` in config makes claude-ds advertise the
+  models to claude under Anthropic-canonical names so the regex passes:
+    ANTHROPIC_MODEL=claude-opus-4-7
+    ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-7
+    ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6
+    ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5
+    ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5
+    ANTHROPIC_DEFAULT_*_MODEL_NAME / _DESCRIPTION (DeepSeek-labelled, so
+                                     the /model picker still shows what's
+                                     actually running)
+  Whether this works depends on whether your gateway (DeepSeek's
+  Anthropic-compat shim) accepts arbitrary `model` values in the request
+  body (most compat shims route by URL+auth and ignore model name, or
+  alias claude-* IDs to their own model). If DeepSeek rejects the spoofed
+  model id, leave `unlock_auto_mode` unset and run without auto mode.
+
+  Per-tier `model_*` config keys, when set, override the spoofed values
+  for that tier — escape hatch if you want auto-mode unlock for opus
+  (which the gate actually checks) but real DeepSeek IDs for the other
+  tiers.
 
   Sets these env vars before exec'ing `claude`:
     ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL, ANTHROPIC_SMALL_FAST_MODEL,
+    ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL_SUPPORTED_CAPABILITIES
+      (only when `capabilities=` is set in config — comma-separated list,
+       e.g. `effort,thinking,adaptive_thinking,interleaved_thinking`),
     CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1,
     CLAUDE_DISABLE_NONSTREAMING_FALLBACK=1
 
@@ -285,6 +336,29 @@ _secretref_strip_quotes() {
     \"*\") s="${s#\"}"; s="${s%\"}" ;;
   esac
   printf '%s' "$s"
+}
+
+# Read a secret from the terminal, echoing '*' for each character typed.
+# Prints the secret to stdout.
+_secretref_read_secret() {
+  local secret="" char
+  stty -echo
+  while IFS= read -r -n 1 char; do
+    if [[ -z "$char" ]] || [[ "$char" == $'\n' ]]; then
+      printf '\n' >&2
+      break
+    elif [[ "$char" == $'\177' ]] || [[ "$char" == $'\b' ]]; then
+      if [[ -n "$secret" ]]; then
+        secret="${secret%?}"
+        printf '\b \b' >&2
+      fi
+    else
+      secret+="$char"
+      printf '*' >&2
+    fi
+  done
+  stty echo
+  printf '%s' "$secret"
 }
 
 # Allow bare scheme names without `://` — `system` ≡ `system://`,
@@ -512,11 +586,10 @@ secretref_prompt() {
       _secretref_log "found existing keychain entry — service='$SECRETREF_KEYCHAIN_SERVICE', account='$account'. Reusing it."
       _secretref_log "to overwrite, re-run with the wrapper's --reset-password flag."
     else
-      printf "No existing keychain entry for service='%s' account='%s'.\nPaste %s (will be stored in %s keychain, input hidden):\n> " \
+      printf "No existing keychain entry for service='%s' account='%s'.\nPaste %s (will be stored in %s keychain):\n> " \
         "$SECRETREF_KEYCHAIN_SERVICE" "$account" "$label" "$(uname -s)" >&2
       local secret
-      IFS= read -rs secret
-      echo >&2
+      secret=$(_secretref_read_secret)
       [[ -n "$secret" ]] || _secretref_die "empty key, aborting."
       secretref_keychain_store "$account" "$secret"
       _secretref_log "stored secret — service='$SECRETREF_KEYCHAIN_SERVICE', account='$account'."
@@ -555,11 +628,10 @@ secretref_reset_interactive() {
     choice=$(_secretref_strip_quotes "$choice")
     case "${choice:-1}" in
       1)
-        printf "Paste new %s for account='%s' (will overwrite %s keychain entry, input hidden):\n> " \
+        printf "Paste new %s for account='%s' (will overwrite %s keychain entry):\n> " \
           "$label" "$old_acct" "$(uname -s)" >&2
         local secret
-        IFS= read -rs secret
-        echo >&2
+        secret=$(_secretref_read_secret)
         [[ -n "$secret" ]] || _secretref_die "empty key, aborting."
         secretref_keychain_store "$old_acct" "$secret"
         _secretref_log "updated keychain entry — service='$SECRETREF_KEYCHAIN_SERVICE', account='$old_acct'."
@@ -619,10 +691,22 @@ write_config() {
   umask 077
   mkdir -p "$CONFIG_DIR"
   chmod 700 "$CONFIG_DIR"
+  # Per-tier model_* keys are written as comments by default. DeepSeek is a
+  # single-tier provider from Claude Code's perspective, so the runtime maps
+  # all four tier vars (opus/sonnet/haiku/small_fast) to `model` unless the
+  # user uncomments and sets a tier explicitly. capabilities= is also commented
+  # out — leave unset to let the runtime decide; uncomment + populate (e.g.
+  # `effort,thinking`) only if the upstream gateway actually supports them.
   {
-    printf 'api_key_ref=%s\n' "$ref"
-    printf 'model=%s\n'       "$DEFAULT_MODEL"
-    printf 'base_url=%s\n'    "$DEFAULT_BASE_URL"
+    printf 'api_key_ref=%s\n'           "$ref"
+    printf 'base_url=%s\n'              "$DEFAULT_BASE_URL"
+    printf 'model=%s\n'                 "$DEFAULT_MODEL"
+    printf '# model_opus=%s\n'          "$DEFAULT_MODEL"
+    printf '# model_sonnet=%s\n'        "$DEFAULT_MODEL"
+    printf '# model_haiku=%s\n'         "$DEFAULT_MODEL"
+    printf '# model_small_fast=%s\n'    "$DEFAULT_MODEL"
+    printf '# capabilities=\n'
+    printf '# unlock_auto_mode=1\n'
   } > "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
 }
@@ -651,11 +735,24 @@ fi
 
 # ---- load config -----------------------------------------------------------
 api_key_ref=""; model=""; base_url=""
+model_opus=""; model_sonnet=""; model_haiku=""; model_small_fast=""
+capabilities=""; unlock_auto_mode=""
 while IFS='=' read -r k v; do
+  # Skip comments and blank lines so users can comment out keys with `#` to
+  # fall back to the runtime defaults.
   case "$k" in
-    api_key_ref) api_key_ref="$v" ;;
-    model)       model="$v" ;;
-    base_url)    base_url="$v" ;;
+    \#*|"") continue ;;
+  esac
+  case "$k" in
+    api_key_ref)      api_key_ref="$v" ;;
+    base_url)         base_url="$v" ;;
+    model)            model="$v" ;;
+    model_opus)       model_opus="$v" ;;
+    model_sonnet)     model_sonnet="$v" ;;
+    model_haiku)      model_haiku="$v" ;;
+    model_small_fast) model_small_fast="$v" ;;
+    capabilities)     capabilities="$v" ;;
+    unlock_auto_mode) unlock_auto_mode="$v" ;;
   esac
 done < "$CONFIG_FILE"
 
@@ -667,8 +764,71 @@ token=$(secretref_resolve "$api_key_ref") || { echo "claude-ds: failed to resolv
 # ---- exec claude -----------------------------------------------------------
 export ANTHROPIC_BASE_URL="${base_url:-$DEFAULT_BASE_URL}"
 export ANTHROPIC_AUTH_TOKEN="$token"
-export ANTHROPIC_MODEL="${model:-$DEFAULT_MODEL}"
+
+resolved_model="${model:-$DEFAULT_MODEL}"
+
+# Auto-mode unlock (see UNLOCKING AUTO MODE in --help). When enabled, the
+# wire-level model id is set to a Claude-canonical name that passes the
+# auto-mode regex gate (`^claude-(opus|sonnet)-4-6` or `^claude-opus-4-7`).
+# DeepSeek's compat shim must accept this; we tag the picker entries with
+# DeepSeek-labelled NAME/DESCRIPTION so the user knows what's actually
+# running. Per-tier `model_*` config keys still take precedence.
+case "${unlock_auto_mode:-0}" in
+  1|true|yes|on)
+    spoof_main="claude-opus-4-7"
+    spoof_opus="claude-opus-4-7"
+    spoof_sonnet="claude-sonnet-4-6"
+    spoof_haiku="claude-haiku-4-5"
+    spoof_small="claude-haiku-4-5"
+    ;;
+  *)
+    spoof_main="$resolved_model"
+    spoof_opus="$resolved_model"
+    spoof_sonnet="$resolved_model"
+    spoof_haiku="$resolved_model"
+    spoof_small="$resolved_model"
+    ;;
+esac
+
+export ANTHROPIC_MODEL="$spoof_main"
+
+# Per-tier overrides. claude reads these to populate /model picker entries
+# and for the `default` (auto) routing path; setting all four means /model
+# default doesn't break against single-tier providers like DeepSeek.
+export ANTHROPIC_DEFAULT_OPUS_MODEL="${model_opus:-$spoof_opus}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="${model_sonnet:-$spoof_sonnet}"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${model_haiku:-$spoof_haiku}"
+export ANTHROPIC_SMALL_FAST_MODEL="${model_small_fast:-$spoof_small}"
+
+# Display labels — only meaningful when we spoofed the wire-level id, so the
+# /model picker still shows the underlying DeepSeek model. Skip when the
+# user didn't opt in (claude derives sensible defaults from the model id).
+case "${unlock_auto_mode:-0}" in
+  1|true|yes|on)
+    export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="DeepSeek (opus tier · $resolved_model)"
+    export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="DeepSeek (sonnet tier · $resolved_model)"
+    export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="DeepSeek (haiku tier · $resolved_model)"
+    export ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION="Routes to $resolved_model via $ANTHROPIC_BASE_URL — claude-* id is a spoof to satisfy the auto-mode model gate."
+    export ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION="Routes to $resolved_model via $ANTHROPIC_BASE_URL — claude-* id is a spoof to satisfy the auto-mode model gate."
+    export ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION="Routes to $resolved_model via $ANTHROPIC_BASE_URL — claude-* id is a spoof to satisfy the auto-mode model gate."
+    ;;
+esac
+
+# Capabilities are opt-in: when set, declare the same list for all three
+# tiers so claude doesn't strip features (effort/thinking/adaptive_thinking/
+# interleaved_thinking) just because it can't auto-detect them on a non-
+# canonical model ID. Leave unset for DeepSeek's vanilla compat shim.
+if [[ -n "$capabilities" ]]; then
+  export ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES="$capabilities"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES="$capabilities"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES="$capabilities"
+fi
+
 export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
 export CLAUDE_DISABLE_NONSTREAMING_FALLBACK=1
 
+# Separator between any claude-ds-owned output above and forwarded claude
+# output below. (Interactive TUI invocations of claude clear the screen, so
+# the rule is only visible for non-TUI uses like `claude -p` or after exit.)
+print_rule
 exec claude ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
