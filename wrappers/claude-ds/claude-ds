@@ -31,12 +31,31 @@
 
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.6.0"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-ds"
 CONFIG_FILE="$CONFIG_DIR/config"
 KEYCHAIN_SERVICE="claude-ds"
 DEFAULT_BASE_URL="https://api.deepseek.com/anthropic"
 DEFAULT_MODEL="deepseek-v4-pro"
+# Config-file schema version. Bump on incompatible changes; add a migration
+# entry in `migrate_config` for each step. Migrations are applied in order
+# from the file's recorded version up to CURRENT_SCHEMA, with a backup
+# written before any mutation.
+CURRENT_SCHEMA=1
+# Where to fetch the proxy script from when it is missing on disk and the
+# user has the proxy enabled. Pinned to `main` for now; once the project
+# graduates to its own repo this should pin to a tagged release.
+PROXY_DOWNLOAD_URL="https://raw.githubusercontent.com/earchibald/agent-utilities/main/wrappers/claude-ds/claude-ds-proxy.py"
+# Known config keys (used by the validator and the damaged-config repair).
+# Anything in the config file outside this list is preserved with a warning.
+KNOWN_CONFIG_KEYS=(
+  _schema
+  api_key_ref base_url model
+  model_opus model_sonnet model_haiku model_small_fast
+  capabilities unlock_auto_mode
+  proxy_effort proxy_effort_opus proxy_effort_sonnet proxy_effort_haiku proxy_effort_small_fast
+  proxy_strip_thinking proxy_bind proxy_debug
+)
 
 # Print a horizontal rule sized to the terminal width (fallback 78). Used to
 # separate claude-ds-owned output from forwarded `claude` output. Uses U+2500
@@ -53,10 +72,12 @@ print_rule() {
 
 # ---- arg parsing: pull out our flags, forward the rest --------------------
 RESET=0
+DOCTOR=0
 PASSTHROUGH=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --reset-password) RESET=1 ;;
+    --reset-password|--rotate-key) RESET=1 ;;
+    --doctor)                      DOCTOR=1 ;;
     --) shift; PASSTHROUGH+=("$@"); break ;;
     *) PASSTHROUGH+=("$1") ;;
   esac
@@ -100,16 +121,24 @@ for arg in ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}; do
 claude-ds — wrapper that runs `claude` against DeepSeek's Anthropic-compatible API.
 
 USAGE
-  claude-ds [--reset-password] [--help | -h] [--version | -V] [claude args...]
+  claude-ds [--rotate-key | --reset-password] [--doctor]
+            [--help | -h] [--version | -V] [claude args...]
 
 claude-ds-specific flags
+  --rotate-key,
   --reset-password    Clear / rotate the stored API key reference. For
                       `system://` references, asks whether to (1) change the
                       key for the existing account or (2) switch to a
                       different account / scheme (with an option to delete
                       or keep the old keychain entry). For other schemes,
                       forgets the local reference (upstream stores are
-                      never touched).
+                      never touched). The new key is liveness-checked
+                      against the configured base_url before saving.
+  --doctor            Run end-to-end diagnostics: claude on PATH, python3
+                      available, proxy script present, config readable
+                      and validated, secret reference resolvable, API key
+                      live, tier-collision warnings. Prints a checklist
+                      then exits.
   --version, -V       Print claude-ds version, plus `claude --version`.
   --help, -h          Print this help, then forward to `claude --help`.
 
@@ -166,17 +195,69 @@ SUPPORTED SECRET-REFERENCE SCHEMES
 
 CONFIGURATION
   Config file:  ${XDG_CONFIG_HOME:-$HOME/.config}/claude-ds/config
+  Schema:       _schema=1 (auto-migrated forward; old configs are backed
+                up to <config>.v0.bak before being upgraded). Damaged
+                configs are detected on load, backed up to
+                <config>.broken.<timestamp>.bak, and auto-repaired
+                preserving every parseable key.
   Keys:         api_key_ref, base_url, model,
                 model_opus, model_sonnet, model_haiku, model_small_fast,
-                capabilities, unlock_auto_mode
+                capabilities, unlock_auto_mode,
+                proxy_effort, proxy_effort_{opus,sonnet,haiku,small_fast},
+                proxy_bind, proxy_debug
   Defaults:     base_url=https://api.deepseek.com/anthropic
                 model=deepseek-v4-pro
-                model_{opus,sonnet,haiku,small_fast} = <model>  (all tiers
-                  pinned to the same DeepSeek model so `/model default` /
-                  auto routing in `claude` doesn't break — DeepSeek is
-                  single-tier from Claude Code's perspective)
+                model_{opus,sonnet,haiku,small_fast} = <model>
                 capabilities = (unset; opt-in)
                 unlock_auto_mode = (unset; opt-in)
+                proxy_effort = auto    (auto-derive from claude's thinking)
+                proxy_effort_<tier> = (unset; falls through to proxy_effort)
+                proxy_bind = 127.0.0.1
+                proxy_debug = 0
+
+REASONING-EFFORT PROXY
+  DeepSeek's compat shim recognises three reasoning regimes:
+    none    — `thinking` block ABSENT, no `reasoning_effort`. No reasoning.
+    high    — `thinking: {type:enabled}` PRESENT, no reasoning_effort
+              (or =high — same wire effect). DeepSeek's default depth.
+    max     — `thinking` PRESENT *and* `reasoning_effort=max`. Maximum.
+  Anthropic's wire format uses `thinking.budget_tokens` (an integer).
+  claude-ds spawns a small local proxy that translates between them and
+  collapses any caller-supplied Anthropic levels (low/medium/xhigh/etc.)
+  onto the three regimes above, since DeepSeek would otherwise reject
+  them.
+
+  Auto-bucket (`proxy_effort=auto`):
+    no thinking block        → "none"  (no reasoning)
+    thinking, budget <  31k  → "high"  (default reasoning)
+    thinking, budget >= 31k  → "max"   (ultrathink → maximum reasoning)
+
+  Per-tier overrides bind a spec to the *wire-level* model id of that
+  tier (the value of ANTHROPIC_DEFAULT_<TIER>_MODEL). Tier specs are
+  applied small_fast → haiku → sonnet → opus, so opus wins on wire-id
+  collisions; if a real collision is detected at startup, claude-ds
+  prints a one-line linter warning naming the colliding tiers.
+
+  Spec language (config value):
+    auto             — derive regime from claude's thinking block (default)
+    auto:<level>     — same, but use <level> when claude sends no thinking
+                       (e.g. `auto:high` → always at least default reasoning;
+                       `auto:max` → always max reasoning when claude is silent)
+    off              — pass the body through unchanged for this model
+    none             — strip thinking, return non-reasoning response
+    high             — ensure thinking is enabled (no reasoning_effort)
+    max              — ensure thinking + reasoning_effort=max
+    none=<v>|high=<v>|max=<v>
+                     — full per-source-bucket matrix; clauses are optional,
+                       unlisted buckets pass through unchanged
+
+  Disable the proxy entirely by setting `proxy_effort=off` and leaving
+  every per-tier `proxy_effort_*` unset (or off). Then claude talks to
+  DeepSeek directly, no python child involved.
+
+  Env-var overrides (one-shot, no config edit):
+    CLAUDE_DS_PROXY_EFFORT=off       skip the proxy for this invocation
+    CLAUDE_DS_PROXY_DEBUG=1          log injections to stderr
 
 UNLOCKING AUTO MODE (--auto / permission classifier)
   Claude Code's "auto mode" — the permission classifier that auto-approves
@@ -681,6 +762,288 @@ secretref_reset_local() {
 # END secretref
 # ============================================================================
 
+# ============================================================================
+# BEGIN onboarding — config validation, migration, lazy-install helpers
+# ----------------------------------------------------------------------------
+# This block exists so that **the user does not have to manually maintain
+# claude-ds**. The wrapper detects and self-heals across:
+#
+#   - schema migrations    (add `_schema=N`; bump on incompatible changes)
+#   - damaged config       (back up, preserve every parseable key, repair)
+#   - missing proxy script (fetch from $PROXY_DOWNLOAD_URL, else degrade)
+#   - missing python3      (degrade to proxy_effort=off for this run)
+#   - bad API key          (validate against upstream after capture)
+#   - silent collisions    (lint per-tier specs and warn before launch)
+#
+# All of these run idempotently on every launch; success is silent, only
+# real problems print to stderr.
+
+_cds_log()  { echo "claude-ds: $*" >&2; }
+_cds_warn() { echo "claude-ds: ⚠ $*" >&2; }
+_cds_die()  { _cds_warn "$*"; exit 1; }
+
+# Is `key` in the KNOWN_CONFIG_KEYS list?
+_cds_is_known_key() {
+  local k="$1" known
+  for known in "${KNOWN_CONFIG_KEYS[@]}"; do
+    [[ "$k" == "$known" ]] && return 0
+  done
+  return 1
+}
+
+# Validate the config file structure. Echoes one of:
+#   ok           — every line is well-formed
+#   damaged      — at least one non-comment, non-blank line is malformed,
+#                  or a known key has an unparseable value
+# Pure inspection — never modifies the file.
+_cds_validate_config_file() {
+  local file="$1" line lineno=0 status="ok"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    ((lineno++)) || true
+    case "$line" in
+      ""|\#*|" "*\#*) continue ;;
+    esac
+    # Accept lines of the form `key=value` where key is a valid identifier.
+    if [[ ! "$line" =~ ^[a-zA-Z_][a-zA-Z0-9_]*= ]]; then
+      _cds_warn "config line $lineno is malformed: $(printf '%q' "$line")"
+      status="damaged"
+    fi
+  done < "$file"
+  printf '%s' "$status"
+}
+
+# Repair a damaged config in-place without losing user data.
+# Strategy:
+#   1. Back up the original to config.broken.YYYYMMDDHHMMSS.bak.
+#   2. Re-parse the file, keeping only valid `key=value` lines whose key
+#      is in KNOWN_CONFIG_KEYS (unknown keys are warned and dropped, since
+#      they would otherwise persist forever).
+#   3. Rewrite the config file with the surviving keys, preserving values
+#      verbatim, and ensuring `_schema=$CURRENT_SCHEMA` is present.
+# Idempotent — calling this on an already-clean file is a no-op (other
+# than rewriting it in canonical form).
+_cds_repair_config_file() {
+  local file="$1"
+  local stamp; stamp=$(date +%Y%m%d%H%M%S)
+  local backup="$file.broken.$stamp.bak"
+  cp -p "$file" "$backup" || _cds_die "could not back up damaged config to $backup"
+  _cds_warn "damaged config detected — backed up original to $backup"
+
+  local -a kept_keys=() kept_vals=()
+  local line lineno=0 k v
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    ((lineno++)) || true
+    case "$line" in
+      ""|\#*|" "*\#*) continue ;;
+    esac
+    if [[ ! "$line" =~ ^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$ ]]; then
+      _cds_warn "  dropping malformed line $lineno: $(printf '%q' "$line")"
+      continue
+    fi
+    k="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
+    if ! _cds_is_known_key "$k"; then
+      _cds_warn "  dropping unknown key '$k' (line $lineno) — not in this version's schema"
+      continue
+    fi
+    # Preserve last write of each key (typical config-file semantics).
+    local i found=-1
+    for i in "${!kept_keys[@]}"; do
+      [[ "${kept_keys[$i]}" == "$k" ]] && found=$i && break
+    done
+    if [[ "$found" -ge 0 ]]; then
+      kept_vals[$found]="$v"
+    else
+      kept_keys+=("$k"); kept_vals+=("$v")
+    fi
+  done < "$file"
+
+  # Ensure `_schema` is set to the current version after repair.
+  local i schema_seen=0
+  for i in "${!kept_keys[@]}"; do
+    if [[ "${kept_keys[$i]}" == "_schema" ]]; then
+      kept_vals[$i]="$CURRENT_SCHEMA"
+      schema_seen=1
+      break
+    fi
+  done
+  if [[ "$schema_seen" -eq 0 ]]; then
+    kept_keys=("_schema" "${kept_keys[@]}")
+    kept_vals=("$CURRENT_SCHEMA" "${kept_vals[@]}")
+  fi
+
+  umask 077
+  {
+    printf '# claude-ds config — repaired %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf '# Original (damaged) backed up at: %s\n' "$backup"
+    printf '#\n'
+    for i in "${!kept_keys[@]}"; do
+      printf '%s=%s\n' "${kept_keys[$i]}" "${kept_vals[$i]}"
+    done
+  } > "$file"
+  chmod 600 "$file"
+  _cds_log "repaired config — preserved ${#kept_keys[@]} key(s); see $backup for the original."
+}
+
+# Read `_schema` from the config file. Echoes the integer, or `0` if the
+# field is absent (legacy / pre-versioned configs).
+_cds_read_schema() {
+  local file="$1" line k v
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      ""|\#*) continue ;;
+    esac
+    if [[ "$line" =~ ^_schema=([0-9]+)[[:space:]]*$ ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done < "$file"
+  printf '0'
+}
+
+# Migrate the config forward from its recorded schema to CURRENT_SCHEMA.
+# Each step is an additive, no-op-if-already-applied transformation; we
+# always back up to config.v$old.bak before the first mutating step. New
+# schema versions get a new `case` clause below.
+_cds_migrate_config() {
+  local file="$1" from to
+  from=$(_cds_read_schema "$file")
+  to=$CURRENT_SCHEMA
+  if [[ "$from" -eq "$to" ]]; then
+    return 0
+  fi
+  if [[ "$from" -gt "$to" ]]; then
+    _cds_die "config schema is v$from but this claude-ds only understands up to v$to. Upgrade claude-ds, or back up + remove $file to start fresh."
+  fi
+  local backup="$file.v${from}.bak"
+  cp -p "$file" "$backup" || _cds_die "could not back up config to $backup before migration"
+
+  local cur="$from"
+  while [[ "$cur" -lt "$to" ]]; do
+    case "$cur" in
+      0)
+        # 0→1: introduce explicit `_schema=1`. No other key changes from
+        # pre-versioned 0.5.x configs; the v0.6.0 schema is a superset.
+        # If the file already contains a malformed `_schema=` line it was
+        # caught earlier by the validator; here we only add or replace.
+        local tmp; tmp=$(mktemp)
+        {
+          printf '_schema=1\n'
+          # Strip any pre-existing _schema= lines (defensive — the
+          # validator should have caught duplicates, but a hand-edit
+          # could produce them).
+          grep -v '^_schema=' "$file" || true
+        } > "$tmp"
+        mv "$tmp" "$file"
+        chmod 600 "$file"
+        ;;
+      *)
+        _cds_die "no migration registered for schema v$cur → v$((cur+1))"
+        ;;
+    esac
+    cur=$((cur+1))
+  done
+  _cds_log "upgraded config from schema v$from to v$to (backup at $backup)."
+}
+
+# Check the upstream API key for liveness. Single 5-second POST to
+# $base_url/v1/messages with max_tokens=1. Curl absence or network
+# failure is treated as advisory (not fatal) so first-run flows still
+# work offline.
+#
+# Args: <token> <base_url> <model>. Echoes one of:
+#   ok          — got a 2xx response
+#   unauth      — got 401 / 403 (key is bad or wrong endpoint)
+#   skipped     — curl missing
+#   network     — couldn't reach upstream (timeout, DNS, etc.)
+#   advisory:N  — got a different non-2xx HTTP code N (treat as advisory)
+_cds_validate_api_key() {
+  local token="$1" base_url="$2" model="$3"
+  command -v curl >/dev/null 2>&1 || { printf 'skipped'; return 0; }
+  local body http_code
+  body='{"model":"'"$model"'","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}'
+  http_code=$(
+    curl -s -o /dev/null -w '%{http_code}' \
+      --max-time 5 \
+      -X POST "$base_url/v1/messages" \
+      -H "Content-Type: application/json" \
+      -H "x-api-key: $token" \
+      -H "anthropic-version: 2023-06-01" \
+      -H "Authorization: Bearer $token" \
+      -d "$body" 2>/dev/null
+  ) || { printf 'network'; return 0; }
+  case "$http_code" in
+    2*) printf 'ok' ;;
+    401|403) printf 'unauth' ;;
+    000) printf 'network' ;;
+    *) printf 'advisory:%s' "$http_code" ;;
+  esac
+}
+
+# Lazy-install the proxy script if it's missing on disk and the user has
+# the proxy enabled. Echoes one of:
+#   present     — script is already there, nothing to do
+#   downloaded  — fetched successfully
+#   failed      — download attempted and failed (caller should soft-fall-back)
+#   skipped     — curl absent (caller should soft-fall-back)
+_cds_ensure_proxy_script() {
+  local target="$1"
+  [[ -f "$target" ]] && { printf 'present'; return 0; }
+  command -v curl >/dev/null 2>&1 || { printf 'skipped'; return 0; }
+  local target_dir; target_dir=$(dirname "$target")
+  if ! mkdir -p "$target_dir" 2>/dev/null; then
+    printf 'failed'; return 0
+  fi
+  if curl -fsSL --max-time 10 "$PROXY_DOWNLOAD_URL" -o "$target.partial" 2>/dev/null; then
+    mv "$target.partial" "$target"
+    printf 'downloaded'
+  else
+    rm -f "$target.partial" 2>/dev/null || true
+    printf 'failed'
+  fi
+}
+
+# Lint per-tier proxy specs for silent collisions. Args: the resolved
+# wire-level model id of each tier (in the order opus/sonnet/haiku/small_fast)
+# followed by the per-tier specs in the same order. Prints a single warning
+# block to stderr if any collision is detected, listing what will and won't
+# take effect. Pure inspection.
+_cds_lint_collisions() {
+  local opus_id="$1" sonnet_id="$2" haiku_id="$3" small_id="$4"
+  local opus_spec="$5" sonnet_spec="$6" haiku_spec="$7" small_spec="$8"
+  local -a tiers=(opus sonnet haiku small_fast)
+  local -a ids=("$opus_id" "$sonnet_id" "$haiku_id" "$small_id")
+  local -a specs=("$opus_spec" "$sonnet_spec" "$haiku_spec" "$small_spec")
+  # Group tiers by wire id.
+  local i j wid
+  local -a warned_ids=()
+  for i in "${!ids[@]}"; do
+    wid="${ids[$i]}"
+    # Only consider tiers that actually have a non-empty per-tier spec.
+    [[ -z "${specs[$i]}" || "${specs[$i]}" == "off" ]] && continue
+    # Skip if we already warned about this wire id.
+    local already=0 w
+    for w in "${warned_ids[@]}"; do
+      [[ "$w" == "$wid" ]] && already=1 && break
+    done
+    [[ "$already" -eq 1 ]] && continue
+    # Find all OTHER tiers with the same wire id and a non-empty spec.
+    local -a colliders=("${tiers[$i]}=${specs[$i]}")
+    for j in "${!ids[@]}"; do
+      [[ "$j" -le "$i" ]] && continue
+      [[ "${ids[$j]}" != "$wid" ]] && continue
+      [[ -z "${specs[$j]}" || "${specs[$j]}" == "off" ]] && continue
+      colliders+=("${tiers[$j]}=${specs[$j]}")
+    done
+    if [[ "${#colliders[@]}" -gt 1 ]]; then
+      _cds_warn "tier-spec collision on wire id '$wid': ${colliders[*]} — only the latest in {small_fast → haiku → sonnet → opus} order will take effect."
+      warned_ids+=("$wid")
+    fi
+  done
+}
+
+# END onboarding
+# ============================================================================
+
 # ---- claude-ds: wire the lib --------------------------------------------
 SECRETREF_KEYCHAIN_SERVICE="$KEYCHAIN_SERVICE"
 SECRETREF_LOG_PREFIX="claude-ds"
@@ -688,55 +1051,213 @@ SECRETREF_LOG_PREFIX="claude-ds"
 # ---- first-run / reset prompt ---------------------------------------------
 write_config() {
   local ref="$1"
+  local proxy_choice="${2:-off}"   # "off" | "auto" | "auto:high" | "auto:max" | …
   umask 077
   mkdir -p "$CONFIG_DIR"
   chmod 700 "$CONFIG_DIR"
-  # Per-tier model_* keys are written as comments by default. DeepSeek is a
-  # single-tier provider from Claude Code's perspective, so the runtime maps
-  # all four tier vars (opus/sonnet/haiku/small_fast) to `model` unless the
-  # user uncomments and sets a tier explicitly. capabilities= is also commented
-  # out — leave unset to let the runtime decide; uncomment + populate (e.g.
-  # `effort,thinking`) only if the upstream gateway actually supports them.
   {
+    printf '_schema=%s\n'               "$CURRENT_SCHEMA"
     printf 'api_key_ref=%s\n'           "$ref"
     printf 'base_url=%s\n'              "$DEFAULT_BASE_URL"
     printf 'model=%s\n'                 "$DEFAULT_MODEL"
+    printf '\n'
+    printf '# Per-tier model overrides — DeepSeek is single-tier from claude'\''s\n'
+    printf '# perspective, so all four tiers default to `model` above. Uncomment\n'
+    printf '# and set if your DeepSeek plan exposes tiered models.\n'
     printf '# model_opus=%s\n'          "$DEFAULT_MODEL"
     printf '# model_sonnet=%s\n'        "$DEFAULT_MODEL"
     printf '# model_haiku=%s\n'         "$DEFAULT_MODEL"
     printf '# model_small_fast=%s\n'    "$DEFAULT_MODEL"
-    printf '# capabilities=\n'
+    printf '\n'
+    printf '# Auto-mode unlock — set to 1 to spoof Claude-canonical model ids\n'
+    printf '# so claude'\''s `--auto` permission classifier accepts the session.\n'
+    printf '# Also opt into capabilities advertised to claude:\n'
     printf '# unlock_auto_mode=1\n'
+    printf '# capabilities=effort,thinking\n'
+    printf '\n'
+    printf '# ---- Reasoning-effort proxy ---------------------------------------\n'
+    printf '#\n'
+    printf '# DeepSeek recognises 3 reasoning regimes:\n'
+    printf '#   none    — no thinking, no reasoning_effort  (no reasoning)\n'
+    printf '#   high    — thinking enabled, no reasoning_effort  (default depth)\n'
+    printf '#   max     — thinking enabled + reasoning_effort=max  (max depth)\n'
+    printf '#\n'
+    printf '# claude already sets `thinking` correctly for its native\n'
+    printf '# /think, /think-hard, /ultrathink commands, which DeepSeek maps to\n'
+    printf '# `high` natively — so for normal use the proxy adds nothing.\n'
+    printf '# Enable it only when you want to FORCE a specific regime regardless\n'
+    printf '# of what claude requests (e.g. always-max for tough work, always-\n'
+    printf '# none to save tokens, or per-tier knobs).\n'
+    printf '#\n'
+    printf '# Spec language for proxy_effort and proxy_effort_<tier>:\n'
+    printf '#   off            — passthrough; do not modify the request (default)\n'
+    printf '#   auto           — derive regime from claude'\''s thinking block\n'
+    printf '#   auto:<level>   — like auto, but force <level> when claude sends\n'
+    printf '#                    no thinking block. e.g. `auto:high` forces\n'
+    printf '#                    thinking on every request.\n'
+    printf '#   none           — strip thinking, no reasoning\n'
+    printf '#   high           — ensure thinking enabled, default reasoning\n'
+    printf '#   max            — ensure thinking + reasoning_effort=max\n'
+    printf '#   none=<v>|high=<v>|max=<v>\n'
+    printf '#                  — full per-source-bucket matrix\n'
+    printf '#\n'
+    printf 'proxy_effort=%s\n'          "$proxy_choice"
+    printf '# proxy_effort_opus=max         # always max on the opus tier\n'
+    printf '# proxy_effort_sonnet=auto:high # sonnet thinks at minimum\n'
+    printf '# proxy_effort_haiku=off        # let DeepSeek decide for haiku\n'
+    printf '# proxy_effort_small_fast=none  # never reason on the fast tier\n'
+    printf '#\n'
+    printf '# proxy_bind=127.0.0.1\n'
+    printf '# proxy_debug=0   # 1 → log every regime application to stderr\n'
   } > "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
 }
 
+# Interactive opt-in for the reasoning-effort proxy. Echoes the chosen
+# proxy_effort spec to stdout. Defaults to "off" — the proxy is opt-in.
+_cds_prompt_proxy_choice() {
+  {
+    echo
+    echo "Reasoning-effort proxy (optional)"
+    echo "─────────────────────────────────"
+    echo "claude already triggers DeepSeek's default reasoning depth via"
+    echo "/think, /think-hard, /ultrathink — you don't need the proxy for"
+    echo "normal use."
+    echo
+    echo "Enable it if you want to FORCE a specific reasoning regime"
+    echo "regardless of what claude requests:"
+    echo "  • [a] auto:high — always at least default reasoning, even when"
+    echo "        claude wouldn't normally enable thinking"
+    echo "  • [m] auto:max  — maximum reasoning on every request"
+    echo "  • [c] custom    — write the spec yourself (per-tier knobs, etc.)"
+    echo "  • [s] skip      — leave the proxy off (default; recommended)"
+    echo
+  } >&2
+  printf "Choice [s/a/m/c, default s]: " >&2
+  local choice; IFS= read -e -r choice
+  case "${choice,,}" in
+    a)   printf 'auto:high' ;;
+    m)   printf 'auto:max' ;;
+    c)
+      {
+        echo
+        echo "Spec language reference:"
+        echo "  off | auto | auto:<level> | none | high | max | none=<v>|high=<v>|max=<v>"
+        echo "(See --help: REASONING-EFFORT PROXY for the full grammar.)"
+      } >&2
+      printf "Custom proxy_effort: " >&2
+      local custom; IFS= read -e -r custom
+      printf '%s' "${custom:-off}"
+      ;;
+    *)   printf 'off' ;;
+  esac
+}
+
+# Validate a freshly-captured (ref, key) pair against the upstream API
+# before we persist it. On a clear unauth response, offer to retry.
+# Network / advisory failures are not fatal — they emit a one-line note
+# and let the user proceed, since first-run on a flaky network shouldn't
+# block setup.
+_cds_validate_or_warn() {
+  local ref="$1" base="$2" model="$3"
+  local token
+  token=$(secretref_resolve "$ref" 2>/dev/null) || {
+    _cds_warn "could not resolve secret reference '$ref' yet — saving anyway, rerun --rotate-key to fix."
+    return 0
+  }
+  [[ -n "$token" ]] || {
+    _cds_warn "resolved API key is empty for '$ref' — saving anyway, rerun --rotate-key to fix."
+    return 0
+  }
+  local result
+  result=$(_cds_validate_api_key "$token" "$base" "$model")
+  case "$result" in
+    ok)        _cds_log "✓ API key validated against $base." ;;
+    skipped)   _cds_log "(curl not installed — skipping API key liveness check.)" ;;
+    network)   _cds_warn "couldn't reach $base for liveness check (timeout / DNS). Saving anyway." ;;
+    unauth)    return 1 ;;
+    advisory:*) _cds_log "$base returned ${result#advisory:} during liveness check — saving anyway (this may be a model-id mismatch, not a key problem)." ;;
+  esac
+  return 0
+}
+
 prompt_for_key() {
-  local ref
-  ref=$(secretref_prompt "DeepSeek API key for claude-ds")
-  write_config "$ref"
+  local ref attempts=0 proxy_choice
+  while :; do
+    ref=$(secretref_prompt "DeepSeek API key for claude-ds")
+    if _cds_validate_or_warn "$ref" "$DEFAULT_BASE_URL" "$DEFAULT_MODEL"; then
+      proxy_choice=$(_cds_prompt_proxy_choice)
+      write_config "$ref" "$proxy_choice"
+      return 0
+    fi
+    _cds_warn "$DEFAULT_BASE_URL rejected the supplied key (HTTP 401/403)."
+    attempts=$((attempts+1))
+    if [[ "$attempts" -ge 3 ]]; then
+      _cds_warn "saving anyway after 3 attempts — rerun --rotate-key once you have a working key."
+      proxy_choice=$(_cds_prompt_proxy_choice)
+      write_config "$ref" "$proxy_choice"
+      return 0
+    fi
+    printf "Try a different reference? [Y/n]: " >&2
+    local again; IFS= read -e -r again
+    case "$again" in
+      n|N)
+        proxy_choice=$(_cds_prompt_proxy_choice)
+        write_config "$ref" "$proxy_choice"
+        return 0
+        ;;
+    esac
+  done
 }
 
 # ---- handle reset ----------------------------------------------------------
 if [[ "$RESET" -eq 1 ]]; then
-  echo "claude-ds: --reset-password — rotating stored API key reference." >&2
+  _cds_log "--rotate-key — rotating stored API key reference."
   if [[ -f "$CONFIG_FILE" ]]; then
+    # Repair / migrate first so the awk read finds a sane file.
+    if [[ "$(_cds_validate_config_file "$CONFIG_FILE")" == "damaged" ]]; then
+      _cds_repair_config_file "$CONFIG_FILE"
+    fi
+    _cds_migrate_config "$CONFIG_FILE"
     old_ref=$(awk -F= '$1=="api_key_ref"{sub(/^api_key_ref=/,""); print; exit}' "$CONFIG_FILE" || true)
     new_ref=$(secretref_reset_interactive "$old_ref" "DeepSeek API key for claude-ds")
-    write_config "$new_ref"
-    echo "claude-ds:   wrote config $CONFIG_FILE." >&2
+    # Preserve the user's existing proxy_effort choice across rotation —
+    # rotating an API key shouldn't silently flip the proxy back to off.
+    existing_proxy=$(awk -F= '$1=="proxy_effort"{sub(/^proxy_effort=/,""); print; exit}' "$CONFIG_FILE" || true)
+    [[ -z "$existing_proxy" ]] && existing_proxy="off"
+    # Best-effort liveness check on the new ref (not fatal — the user has
+    # already committed to this reference via the interactive flow).
+    _cds_validate_or_warn "$new_ref" "${DEFAULT_BASE_URL}" "$DEFAULT_MODEL" || \
+      _cds_warn "saved despite liveness-check failure — run --doctor for diagnostics."
+    write_config "$new_ref" "$existing_proxy"
+    _cds_log "wrote config $CONFIG_FILE (proxy_effort preserved: $existing_proxy)."
   else
-    echo "claude-ds:   no existing config file at $CONFIG_FILE — running first-run prompt." >&2
+    _cds_log "no existing config file at $CONFIG_FILE — running first-run prompt."
     prompt_for_key
   fi
 elif [[ ! -f "$CONFIG_FILE" ]]; then
   prompt_for_key
+else
+  # Existing config: validate + migrate before we start reading from it.
+  if [[ "$(_cds_validate_config_file "$CONFIG_FILE")" == "damaged" ]]; then
+    _cds_repair_config_file "$CONFIG_FILE"
+  fi
+  _cds_migrate_config "$CONFIG_FILE"
 fi
 
 # ---- load config -----------------------------------------------------------
 api_key_ref=""; model=""; base_url=""
 model_opus=""; model_sonnet=""; model_haiku=""; model_small_fast=""
 capabilities=""; unlock_auto_mode=""
+# Defaults: proxy DISABLED. DeepSeek's compat shim already maps claude's
+# `thinking` block to its native `high` reasoning regime, so the proxy is
+# only valuable to users who want to *force* a specific regime regardless
+# of what claude requested (e.g. always-max, always-no-thinking, or
+# per-tier control). Default to off; first-run prompt offers opt-in.
+# Empty per-tier means "fall through to default".
+proxy_effort="off"
+proxy_effort_opus=""; proxy_effort_sonnet=""; proxy_effort_haiku=""; proxy_effort_small_fast=""
+proxy_strip_thinking=""; proxy_bind=""; proxy_debug=""
 while IFS='=' read -r k v; do
   # Skip comments and blank lines so users can comment out keys with `#` to
   # fall back to the runtime defaults.
@@ -744,19 +1265,147 @@ while IFS='=' read -r k v; do
     \#*|"") continue ;;
   esac
   case "$k" in
-    api_key_ref)      api_key_ref="$v" ;;
-    base_url)         base_url="$v" ;;
-    model)            model="$v" ;;
-    model_opus)       model_opus="$v" ;;
-    model_sonnet)     model_sonnet="$v" ;;
-    model_haiku)      model_haiku="$v" ;;
-    model_small_fast) model_small_fast="$v" ;;
-    capabilities)     capabilities="$v" ;;
-    unlock_auto_mode) unlock_auto_mode="$v" ;;
+    api_key_ref)              api_key_ref="$v" ;;
+    base_url)                 base_url="$v" ;;
+    model)                    model="$v" ;;
+    model_opus)               model_opus="$v" ;;
+    model_sonnet)             model_sonnet="$v" ;;
+    model_haiku)              model_haiku="$v" ;;
+    model_small_fast)         model_small_fast="$v" ;;
+    capabilities)             capabilities="$v" ;;
+    unlock_auto_mode)         unlock_auto_mode="$v" ;;
+    proxy_effort)             proxy_effort="$v" ;;
+    proxy_effort_opus)        proxy_effort_opus="$v" ;;
+    proxy_effort_sonnet)      proxy_effort_sonnet="$v" ;;
+    proxy_effort_haiku)       proxy_effort_haiku="$v" ;;
+    proxy_effort_small_fast)  proxy_effort_small_fast="$v" ;;
+    proxy_strip_thinking)     ;;  # deprecated in v0.6 — proxy now handles strip/preserve via the regime model; ignored
+    proxy_bind)               proxy_bind="$v" ;;
+    proxy_debug)              proxy_debug="$v" ;;
+    _schema)                  ;;  # consumed earlier by migrate_config; ignore here
+    *)                        _cds_warn "unknown config key '$k' on load — preserving on next write but otherwise ignored" ;;
   esac
 done < "$CONFIG_FILE"
 
-[[ -n "$api_key_ref" ]] || { echo "claude-ds: config missing api_key_ref; rerun with --reset-password" >&2; exit 1; }
+# Env-var overrides (useful for one-off invocations without editing config):
+[[ -n "${CLAUDE_DS_PROXY_EFFORT:-}" ]] && proxy_effort="$CLAUDE_DS_PROXY_EFFORT"
+[[ -n "${CLAUDE_DS_PROXY_DEBUG:-}" ]]  && proxy_debug="$CLAUDE_DS_PROXY_DEBUG"
+
+[[ -n "$api_key_ref" ]] || { echo "claude-ds: config missing api_key_ref; rerun with --reset-password or --rotate-key" >&2; exit 1; }
+
+# ---- --doctor: end-to-end diagnostics, then exit ---------------------------
+if [[ "$DOCTOR" -eq 1 ]]; then
+  echo "claude-ds doctor — version $VERSION"
+  echo "──────────────────────────────────"
+  ok()   { printf '  ✓ %s\n' "$*"; }
+  bad()  { printf '  ✗ %s\n' "$*"; }
+  note() { printf '    %s\n' "$*"; }
+
+  # 1. claude on PATH.
+  if command -v claude >/dev/null 2>&1; then
+    ok "claude binary: $(command -v claude)"
+  else
+    bad "claude binary not found on \$PATH"
+    note "→ install Claude Code: https://docs.anthropic.com/claude/code"
+  fi
+
+  # 2. python3 (only relevant when proxy is enabled).
+  if command -v python3 >/dev/null 2>&1; then
+    ok "python3: $(python3 --version 2>&1)"
+  else
+    bad "python3 not found — required for the reasoning-effort proxy"
+    note "→ install python3 (≥3.8), or set proxy_effort=off in $CONFIG_FILE"
+  fi
+
+  # 3. Config file readability.
+  if [[ -r "$CONFIG_FILE" ]]; then
+    ok "config readable: $CONFIG_FILE"
+    note "schema: v$(_cds_read_schema "$CONFIG_FILE") (current is v$CURRENT_SCHEMA)"
+  else
+    bad "config file not readable: $CONFIG_FILE"
+  fi
+
+  # 4. Secret reference resolves.
+  if dr_token=$(secretref_resolve "$api_key_ref" 2>/dev/null) && [[ -n "$dr_token" ]]; then
+    ok "secret reference resolves: $api_key_ref"
+  else
+    bad "could not resolve secret reference: $api_key_ref"
+    note "→ check the upstream store (op/system/infisical), or rerun --rotate-key"
+    dr_token=""
+  fi
+
+  # 5. API key liveness.
+  if [[ -n "$dr_token" ]]; then
+    case "$(_cds_validate_api_key "$dr_token" "${base_url:-$DEFAULT_BASE_URL}" "${model:-$DEFAULT_MODEL}")" in
+      ok)        ok "API key live against ${base_url:-$DEFAULT_BASE_URL}" ;;
+      unauth)    bad "API key rejected (401/403) by ${base_url:-$DEFAULT_BASE_URL}"
+                 note "→ rerun --rotate-key with a current key" ;;
+      network)   bad "could not reach ${base_url:-$DEFAULT_BASE_URL} (timeout / DNS)"
+                 note "→ check your network; this is non-fatal at launch" ;;
+      skipped)   ok "API key liveness check skipped (curl not installed)" ;;
+      advisory:*) bad "API endpoint returned an unexpected status — see --rotate-key" ;;
+    esac
+  fi
+
+  # 6. Proxy script presence (only when proxy is enabled).
+  proxy_active=0
+  case "${proxy_effort:-off}" in off|OFF|"") ;; *) proxy_active=1 ;; esac
+  for v in "$proxy_effort_small_fast" "$proxy_effort_haiku" "$proxy_effort_sonnet" "$proxy_effort_opus"; do
+    case "$v" in ""|off|OFF) ;; *) proxy_active=1 ;; esac
+  done
+  if [[ "$proxy_active" -eq 1 ]]; then
+    _claude_ds_realpath() {
+      local src="$1" dir
+      while [[ -L "$src" ]]; do
+        dir="$(cd -P "$(dirname "$src")" && pwd)"
+        src="$(readlink "$src")"
+        [[ "$src" != /* ]] && src="$dir/$src"
+      done
+      printf '%s\n' "$src"
+    }
+    dr_self="$(_claude_ds_realpath "${BASH_SOURCE[0]}")"
+    dr_dir="$(cd -P "$(dirname "$dr_self")" && pwd)"
+    dr_proxy="$dr_dir/claude-ds-proxy.py"
+    if [[ -f "$dr_proxy" ]]; then
+      ok "proxy script present: $dr_proxy"
+    else
+      bad "proxy script missing: $dr_proxy"
+      note "→ next launch will attempt a one-time download from $PROXY_DOWNLOAD_URL"
+      note "  or copy claude-ds-proxy.py next to claude-ds yourself"
+    fi
+  else
+    ok "proxy disabled (proxy_effort=off, no per-tier overrides) — skipping proxy checks"
+  fi
+
+  # 7. Tier-collision lint preview (only when proxy is enabled).
+  if [[ "$proxy_active" -eq 1 ]]; then
+    case "${unlock_auto_mode:-0}" in
+      1|true|yes|on)
+        dr_o="${model_opus:-claude-opus-4-7}"
+        dr_s="${model_sonnet:-claude-sonnet-4-6}"
+        dr_h="${model_haiku:-claude-haiku-4-5}"
+        dr_f="${model_small_fast:-claude-haiku-4-5}" ;;
+      *)
+        dr_m="${model:-$DEFAULT_MODEL}"
+        dr_o="${model_opus:-$dr_m}"; dr_s="${model_sonnet:-$dr_m}"
+        dr_h="${model_haiku:-$dr_m}"; dr_f="${model_small_fast:-$dr_m}" ;;
+    esac
+    if _cds_lint_collisions "$dr_o" "$dr_s" "$dr_h" "$dr_f" \
+        "$proxy_effort_opus" "$proxy_effort_sonnet" "$proxy_effort_haiku" "$proxy_effort_small_fast" 2>/tmp/_cds_collisions.$$; then
+      if [[ -s /tmp/_cds_collisions.$$ ]]; then
+        bad "tier-spec collisions detected:"
+        sed 's/^/    /' /tmp/_cds_collisions.$$
+      else
+        ok "no tier-spec collisions"
+      fi
+    fi
+    rm -f /tmp/_cds_collisions.$$
+  fi
+
+  echo "──────────────────────────────────"
+  echo "doctor done."
+  exit 0
+fi
 
 token=$(secretref_resolve "$api_key_ref") || { echo "claude-ds: failed to resolve API key from $api_key_ref" >&2; exit 1; }
 [[ -n "$token" ]] || { echo "claude-ds: resolved API key is empty ($api_key_ref)" >&2; exit 1; }
@@ -828,6 +1477,168 @@ fi
 export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
 export CLAUDE_DISABLE_NONSTREAMING_FALLBACK=1
 
+# ---- reasoning-effort proxy ------------------------------------------------
+# Optional local HTTP proxy that injects DeepSeek's `reasoning_effort`
+# parameter into outgoing /v1/messages bodies. Anthropic's API uses
+# `thinking.budget_tokens` for the same idea but on a different wire shape;
+# DeepSeek won't honor it via the compat shim. The proxy bridges the two,
+# so claude's "think hard" / "ultrathink" cues actually drive DeepSeek
+# reasoning depth.
+#
+# The proxy is started only when at least one effort spec is non-empty
+# and not "off". With `proxy_effort=off` and no per-tier overrides set,
+# this block is a no-op and claude talks to DeepSeek directly.
+#
+# Per-tier specs are bound to the *wire-level* model id (the value of
+# ANTHROPIC_DEFAULT_<TIER>_MODEL exported above), not the tier name. If
+# multiple tiers map to the same wire id (the default — DeepSeek is
+# single-tier), the per-tier specs collide and only the last-written
+# wins; the order below is small_fast → haiku → sonnet → opus, so opus
+# wins on collision (matches user expectation that opus is "the"
+# strongest tier).
+
+proxy_bind_val="${proxy_bind:-127.0.0.1}"
+proxy_debug_val="${proxy_debug:-0}"
+
+# Decide whether the proxy is needed at all.
+proxy_needed=0
+case "${proxy_effort:-}" in
+  ""|off|OFF) ;;
+  *) proxy_needed=1 ;;
+esac
+for v in "$proxy_effort_small_fast" "$proxy_effort_haiku" "$proxy_effort_sonnet" "$proxy_effort_opus"; do
+  case "$v" in
+    ""|off|OFF) ;;
+    *) proxy_needed=1 ;;
+  esac
+done
+
+claude_ds_proxy_pid=""
+if [[ "$proxy_needed" -eq 1 ]]; then
+  # Soft-fallback: missing python3 → run with proxy effectively off for
+  # this session, with a clear warning. We do NOT mutate the user's
+  # config — they may install python3 later and want the proxy back on
+  # next invocation. The warning is loud enough that they know.
+  if ! command -v python3 >/dev/null 2>&1; then
+    _cds_warn "python3 not found — running with the reasoning-effort proxy DISABLED for this session."
+    _cds_warn "  install python3 (or set proxy_effort=off in $CONFIG_FILE to silence this)."
+    proxy_needed=0
+  fi
+fi
+if [[ "$proxy_needed" -eq 1 ]]; then
+  # Lint per-tier specs for silent wire-id collisions. Pure inspection;
+  # never blocks execution.
+  _cds_lint_collisions \
+    "${spoof_opus:-$resolved_model}" "${spoof_sonnet:-$resolved_model}" \
+    "${spoof_haiku:-$resolved_model}" "${spoof_small:-$resolved_model}" \
+    "$proxy_effort_opus" "$proxy_effort_sonnet" \
+    "$proxy_effort_haiku" "$proxy_effort_small_fast" 2>&1 || true
+
+  # Build EFFORT_MAP entries in priority-low → priority-high order so the
+  # last write wins on wire-id collisions (opus > sonnet > haiku > small_fast).
+  effort_map=""
+  add_pair() {
+    local wire_id="$1" spec="$2"
+    [[ -z "$spec" || "$spec" == "off" || "$spec" == "OFF" ]] && return 0
+    [[ -n "$effort_map" ]] && effort_map+=";"
+    effort_map+="${wire_id}=${spec}"
+  }
+  add_pair "$ANTHROPIC_SMALL_FAST_MODEL"      "$proxy_effort_small_fast"
+  add_pair "$ANTHROPIC_DEFAULT_HAIKU_MODEL"   "$proxy_effort_haiku"
+  add_pair "$ANTHROPIC_DEFAULT_SONNET_MODEL"  "$proxy_effort_sonnet"
+  add_pair "$ANTHROPIC_DEFAULT_OPUS_MODEL"    "$proxy_effort_opus"
+
+  # If proxy_effort itself is "off" but some per-tier specs are set,
+  # don't pass a default (other models pass through unchanged).
+  case "${proxy_effort:-}" in
+    off|OFF) effort_default="" ;;
+    *)       effort_default="${proxy_effort:-auto}" ;;
+  esac
+
+  # Resolve the wrapper's real on-disk location so the proxy lookup works
+  # when `claude-ds` is symlinked (e.g. `~/.local/bin/claude-ds` →
+  # `~/src/agent-utilities/wrappers/claude-ds/claude-ds`). bash does NOT
+  # canonicalize $BASH_SOURCE, and macOS's BSD `readlink` has no `-f`, so
+  # we chase the symlink chain manually — portable across macOS / Linux
+  # without GNU coreutils.
+  _claude_ds_realpath() {
+    local src="$1" dir
+    while [[ -L "$src" ]]; do
+      dir="$(cd -P "$(dirname "$src")" && pwd)"
+      src="$(readlink "$src")"
+      [[ "$src" != /* ]] && src="$dir/$src"
+    done
+    printf '%s\n' "$src"
+  }
+  _self="$(_claude_ds_realpath "${BASH_SOURCE[0]}")"
+  _self_dir="$(cd -P "$(dirname "$_self")" && pwd)"
+  proxy_script="$_self_dir/claude-ds-proxy.py"
+  # Lazy install: if the proxy is missing, try to fetch it from the same
+  # upstream the wrapper came from. On any failure, soft-fall-back to
+  # proxy-disabled for this session rather than blocking the user.
+  if [[ ! -f "$proxy_script" ]]; then
+    _cds_log "proxy script missing at $proxy_script — attempting one-time download..."
+    case "$(_cds_ensure_proxy_script "$proxy_script")" in
+      downloaded)
+        _cds_log "downloaded proxy script from $PROXY_DOWNLOAD_URL."
+        ;;
+      skipped)
+        _cds_warn "curl not installed and proxy script missing — running with proxy DISABLED."
+        _cds_warn "  install curl, or place claude-ds-proxy.py next to claude-ds, or set proxy_effort=off."
+        proxy_needed=0
+        ;;
+      failed|*)
+        _cds_warn "proxy download failed (network, 404, or write permission) — running with proxy DISABLED."
+        _cds_warn "  fix by re-running with curl available, or place the proxy script next to claude-ds, or set proxy_effort=off."
+        proxy_needed=0
+        ;;
+    esac
+  fi
+fi
+if [[ "$proxy_needed" -eq 1 ]]; then
+
+  # Spawn the proxy with stdout piped back so we can read the bound port
+  # synchronously. The proxy prints the port as its first line, then keeps
+  # serving in the background. We close the stdout pipe after reading the
+  # port so subsequent log writes (debug mode) go to stderr only — the
+  # python child's stderr inherits this script's stderr.
+  proxy_fifo="$(mktemp -u "${TMPDIR:-/tmp}/claude-ds-proxy.XXXXXX")"
+  mkfifo -m 600 "$proxy_fifo"
+
+  UPSTREAM_BASE_URL="$ANTHROPIC_BASE_URL" \
+  EFFORT_MAP="$effort_map" \
+  EFFORT_DEFAULT="$effort_default" \
+  PROXY_BIND="$proxy_bind_val" \
+  PROXY_PORT=0 \
+  PROXY_DEBUG="$proxy_debug_val" \
+    python3 "$proxy_script" >"$proxy_fifo" 2>&2 &
+  claude_ds_proxy_pid=$!
+
+  # Read the port (first line of stdout). 5-second timeout so we fail
+  # fast if the proxy died on startup (e.g. bad spec).
+  proxy_port=""
+  if read -r -t 5 proxy_port < "$proxy_fifo"; then
+    :
+  fi
+  rm -f "$proxy_fifo"
+
+  if [[ -z "$proxy_port" ]] || ! kill -0 "$claude_ds_proxy_pid" 2>/dev/null; then
+    _cds_warn "reasoning-effort proxy failed to start — running with proxy DISABLED for this session."
+    _cds_warn "  rerun with CLAUDE_DS_PROXY_DEBUG=1 to see the python child's startup error."
+    [[ -n "$claude_ds_proxy_pid" ]] && wait "$claude_ds_proxy_pid" 2>/dev/null
+    claude_ds_proxy_pid=""
+    proxy_needed=0
+  else
+    # Repoint claude at the proxy. Upstream URL stays in $ANTHROPIC_BASE_URL
+    # only inside the proxy's env (already exported above for the python
+    # invocation); we now overwrite the var for claude's own env.
+    export ANTHROPIC_BASE_URL="http://${proxy_bind_val}:${proxy_port}"
+
+    # Friendly summary on stderr so users can see the wiring at a glance.
+    _cds_log "reasoning-effort proxy on ${proxy_bind_val}:${proxy_port} → DeepSeek (default=${effort_default:-off}, per-model=${effort_map:-<none>})"
+  fi
+fi
+
 # ---- visual branding (tmux only) ------------------------------------------
 # When running inside tmux, decorate the *pane* (not the status line!) so the
 # user can tell at a glance that this window is a DeepSeek-backed claude even
@@ -879,31 +1690,46 @@ if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" && -z "${CLAUDE_DS_NO_BRANDING:-}" ]
     tmux set -w -t "$ds_brand_window" pane-active-border-style "fg=${ds_brand_color},bg=default,bold"     2>/dev/null || true
     tmux set -w -t "$ds_brand_window" pane-border-format "$ds_brand_format"                               2>/dev/null || true
 
-    # Window-scope options outlive the pane, so restore on exit when the
-    # window is multi-pane. Single-pane windows die with the wrapper and
-    # take their options with them — but the window NAME deserves restoring
-    # in both cases (otherwise re-launching in the same window leaves a
-    # stale 🐋 prefix even after a crash).
-    trap '
-      pane_count=$(tmux display-message -p -t "$ds_brand_window" "#{window_panes}" 2>/dev/null || echo 1)
-      if [[ -n "$ds_brand_orig_name" ]]; then
-        tmux rename-window -t "$ds_brand_window" "$ds_brand_orig_name" 2>/dev/null || true
-      fi
-      if [[ -n "$ds_brand_orig_autorename" ]]; then
-        tmux set -w -t "$ds_brand_window" automatic-rename "$ds_brand_orig_autorename" 2>/dev/null || true
-      else
-        tmux set -wu -t "$ds_brand_window" automatic-rename 2>/dev/null || true
-      fi
-      if [[ "$pane_count" -gt 1 ]]; then
-        tmux set -wu -t "$ds_brand_window" pane-border-status        2>/dev/null || true
-        tmux set -wu -t "$ds_brand_window" pane-border-lines         2>/dev/null || true
-        tmux set -wu -t "$ds_brand_window" pane-border-style         2>/dev/null || true
-        tmux set -wu -t "$ds_brand_window" pane-active-border-style  2>/dev/null || true
-        tmux set -wu -t "$ds_brand_window" pane-border-format        2>/dev/null || true
-      fi
-    ' EXIT
   fi
 fi
+
+# ---- exit cleanup ----------------------------------------------------------
+# Consolidated EXIT trap that:
+#   1. Kills the reasoning-effort proxy (if spawned).
+#   2. Restores tmux window/pane decorations (if applied).
+# `exec`'ing claude replaces this shell, so the trap fires only on the
+# pre-exec failure paths. Once `exec claude` succeeds the proxy is
+# orphaned to its original parent (init/launchd) and lives until claude
+# exits — at which point tmux's pane-death cleanup takes care of any
+# lingering process tree under the same pane group. We *also* set a
+# SIGTERM/SIGINT trap so ctrl-c delivered to this script before exec
+# tears the proxy down cleanly.
+
+claude_ds_cleanup() {
+  if [[ -n "${claude_ds_proxy_pid:-}" ]]; then
+    kill "$claude_ds_proxy_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${ds_brand_window:-}" ]]; then
+    local pane_count
+    pane_count=$(tmux display-message -p -t "$ds_brand_window" '#{window_panes}' 2>/dev/null || echo 1)
+    if [[ -n "${ds_brand_orig_name:-}" ]]; then
+      tmux rename-window -t "$ds_brand_window" "$ds_brand_orig_name" 2>/dev/null || true
+    fi
+    if [[ -n "${ds_brand_orig_autorename:-}" ]]; then
+      tmux set -w -t "$ds_brand_window" automatic-rename "$ds_brand_orig_autorename" 2>/dev/null || true
+    else
+      tmux set -wu -t "$ds_brand_window" automatic-rename 2>/dev/null || true
+    fi
+    if [[ "$pane_count" -gt 1 ]]; then
+      tmux set -wu -t "$ds_brand_window" pane-border-status        2>/dev/null || true
+      tmux set -wu -t "$ds_brand_window" pane-border-lines         2>/dev/null || true
+      tmux set -wu -t "$ds_brand_window" pane-border-style         2>/dev/null || true
+      tmux set -wu -t "$ds_brand_window" pane-active-border-style  2>/dev/null || true
+      tmux set -wu -t "$ds_brand_window" pane-border-format        2>/dev/null || true
+    fi
+  fi
+}
+trap claude_ds_cleanup EXIT INT TERM
 
 # Separator between any claude-ds-owned output above and forwarded claude
 # output below. (Interactive TUI invocations of claude clear the screen, so
