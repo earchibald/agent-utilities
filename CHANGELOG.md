@@ -6,6 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `wrappers/claude-ds/claude-ds` v0.6.0 — onboarding-and-self-healing release. The wrapper now does for the user nearly everything the previous README told the user to do manually. Specifically:
+
+  - **Config schema versioning + auto-migration.** New `_schema=N` field in the config; the wrapper detects older schemas on launch, backs up the original to `<config>.v<old>.bak`, and migrates forward in place. Newer-than-supported schemas are rejected with a clear "upgrade claude-ds" message rather than silently corrupting data.
+
+  - **Damaged-config detection + non-destructive auto-repair.** Pre-load validator scans every line for `key=value` shape; on any malformed line, the original is backed up to `<config>.broken.<timestamp>.bak`, malformed lines are dropped with a named warning, unknown-key lines are warned and dropped (forward-compat: a future schema will surface them differently), and the file is rewritten with every parseable known key preserved. **No user data is ever lost** — the backup remains until the user removes it.
+
+  - **Lazy-install of the optional proxy sidecar.** When `proxy_effort` is enabled and `claude-ds-proxy.py` is missing on disk, the wrapper attempts a one-time `curl` of the script from `$PROXY_DOWNLOAD_URL` (default: `raw.githubusercontent.com/earchibald/agent-utilities/main/wrappers/claude-ds/claude-ds-proxy.py`). On success the script is placed beside `claude-ds` and execution continues normally. On failure (network, 404, missing curl, write-permission), the wrapper **soft-falls-back** to running with the proxy disabled for that session, prints a single clear warning, and **never mutates the config file**. The user can install python3 / curl / the proxy script later and the next launch picks it up.
+
+  - **`python3` soft-fallback.** When `proxy_effort` is enabled but `python3` is missing on `$PATH`, the wrapper warns once and runs with the proxy disabled for that session — instead of the previous hard-fail. The user is told what to install (or to set `proxy_effort=off` to silence).
+
+  - **API-key liveness validation.** After first-run capture or `--rotate-key`, the wrapper runs a 5-second `POST /v1/messages` liveness probe with `max_tokens=1` against the configured `base_url`. On HTTP 401/403, the user is re-prompted (up to 3 attempts). On network failure or unexpected status, a single advisory line is printed and the config is saved anyway (offline-friendly first-run). On a clean 2xx, the key is silently saved.
+
+  - **`--doctor` end-to-end diagnostics.** New flag prints a 7-step checklist with ✓/✗ markers and actionable next-step text per row: claude on `$PATH`, python3 ≥ 3.8 available, config readable + schema version, secret reference resolvable, API key live against upstream, proxy script presence (when proxy enabled), and per-tier collision lint. Designed so a user with a broken setup never has to ask "what's wrong?" — they just run `--doctor`.
+
+  - **`--rotate-key` alias for `--reset-password`.** The new name reflects what the operation actually does (rotate an API key, not reset a password). Both flags are accepted; both routes preserve the user's existing `proxy_effort` choice across rotation, so rotating a key never silently flips the proxy back to off.
+
+  - **Per-tier collision linter.** On every launch with the proxy enabled, the wrapper computes the resolved wire-level model id for each tier (taking `unlock_auto_mode` and `model_*` overrides into account) and warns the moment two tiers with non-empty `proxy_effort_*` specs map to the same wire id. The warning names the colliding tiers and notes which one will take effect (priority order `small_fast → haiku → sonnet → opus`, opus wins).
+
+  - **Interactive proxy opt-in on first run.** First-run prompt now offers four choices for `proxy_effort` (skip, `auto:high`, `auto:max`, custom), since the proxy is now off by default. Default selection is "skip" (recommended).
+
+  - **Symlink-aware proxy script lookup.** `_claude_ds_realpath` is a small portable readlink-loop (works on macOS BSD `readlink` and Linux GNU `readlink` alike) that canonicalises `${BASH_SOURCE[0]}` before computing the proxy's location. Previously, symlinking `claude-ds` from `~/.local/bin` to a source-tree checkout would leave the proxy unfindable because bash does not auto-resolve `BASH_SOURCE`. Now `ln -s ~/src/agent-utilities/wrappers/claude-ds/claude-ds ~/.local/bin/claude-ds` is sufficient — the proxy is found in the source tree without a second symlink.
+
+- `wrappers/claude-ds/README.md` — full-product README (install, quickstart, "what the wrapper does for you", configuration scenarios, reasoning-effort proxy spec language, secret-reference guide, troubleshooting, developer notes). Reviewed by three Sonnet agents and one (handicapped) Opus agent in competition; the verified-correct findings were applied. Notable applied feedback: explicit symlink-supported callout, security disclosure that the resolved API key lives in the `claude` process environment, restructure to put scenario-based configs *before* the reference table (so users discover the three common shapes first), Linux `systemd --user` orphan-watchdog caveat, and a corrected per-tier collision matrix that handles the `unlock_auto_mode=1` case (where haiku and small_fast collide on `claude-haiku-4-5` rather than all four tiers collapsing onto a single wire id). Opus took the cookies.
+
+### Changed
+
+- **Reasoning-effort proxy: corrected DeepSeek regime model.** Earlier v0.5 versions assumed DeepSeek supported the full Anthropic level set (`minimal`, `low`, `medium`, `high`). Per DeepSeek's compat shim documentation, only three reasoning regimes are actually distinguishable on the wire:
+  1. `none` — `thinking` block absent, no `reasoning_effort` (no reasoning)
+  2. `high` — `thinking: {"type": "enabled"}` present, no `reasoning_effort` *or* `=high` (default reasoning depth — same wire effect either way)
+  3. `max` — `thinking` present **and** `reasoning_effort=max` (maximum depth)
+
+  The proxy's spec language now collapses to `{off, none, high, max, auto, auto:<level>, none=<v>|high=<v>|max=<v>}`. Caller-supplied Anthropic-style values (`low`, `medium`, `xhigh`, `minimal`) are normalised to one of the three regimes rather than passed through (DeepSeek would otherwise reject them silently). The proxy now applies a *transformation* on each request rather than just an injection: `none` strips both `thinking` and `reasoning_effort`; `high` ensures `thinking: {type: enabled}` (preserving any caller-supplied `budget_tokens`) and strips `reasoning_effort`; `max` ensures thinking and sets `reasoning_effort=max`. Auto-bucket thresholds: no thinking → `none`; thinking with budget < 31000 → `high`; thinking with budget ≥ 31000 → `max` (matching `ultrathink` ≈ 31999).
+
+- **Reasoning-effort proxy: now off by default.** DeepSeek already maps claude's `/think`, `/think-hard`, `/ultrathink` commands to its native reasoning regime via the `thinking` block claude already sends, so the proxy adds nothing for normal use. New configs default to `proxy_effort=off`. The proxy is opt-in for users who want to *force* a specific regime regardless of what claude requests (always-max, always-none, per-tier knobs); the first-run flow offers four interactive choices (skip / `auto:high` / `auto:max` / custom).
+
+- **Reasoning-effort proxy: `STRIP_THINKING` env var removed; `proxy_strip_thinking` config key deprecated.** Strip-vs-preserve behaviour is now baked into the regime model itself: the `none` regime strips, `high` and `max` preserve. Setting `proxy_strip_thinking` is silently ignored on load (so old configs don't break); a future schema migration will remove it from rewritten configs.
+
+### Deprecated
+
+- `proxy_strip_thinking` config key. Honoured for read (silently ignored) on load to avoid breaking older configs. The damaged-config repair path drops it with an `unknown key` warning when the parser doesn't recognise it post-migration. Will be cleaned up in a future schema migration.
+
+- `wrappers/claude-ds/claude-ds-proxy.py` — request-rewriting HTTP proxy (Python 3 stdlib, no third-party deps) that translates Anthropic's `thinking.budget_tokens` into DeepSeek's `reasoning_effort` enum on outgoing `/v1/messages` bodies. Resolution is a 2-D matrix keyed by `(spoofed_model_id, source_bucket)` where the source bucket is derived from the request's `thinking` field (`none` when absent or disabled; otherwise `low <4096`, `medium <16384`, `high >=16384` — thresholds aligned with Claude Code's canned `think` / `think hard` / `ultrathink` levels). Per-model and global resolvers accept a small spec language: `off`, `<level>`, `auto`, `auto:<level>` (auto with a fallback for the no-thinking case), and a full per-bucket matrix `none=<v>|low=<v>|medium=<v>|high=<v>`. Streaming SSE bodies are forwarded byte-for-byte under HTTP/1.1 + `Connection: close` so chunked re-encoding isn't needed. The proxy strips the original `thinking` block after injection by default (configurable via `STRIP_THINKING=0`) since DeepSeek's compat shim doesn't accept Anthropic's thinking spec. A daemon-thread orphan watchdog polls `os.getppid()` and exits when the wrapper's PID is reaped (so the proxy doesn't leak after `claude` exits, since `exec claude` replaces the wrapper shell and prevents its EXIT trap from firing).
+
+- Reasoning-effort proxy integration in `wrappers/claude-ds/claude-ds`. New config keys: `proxy_effort` (default `auto`), `proxy_effort_{opus,sonnet,haiku,small_fast}`, `proxy_strip_thinking` (default `1`), `proxy_bind` (default `127.0.0.1`), `proxy_debug`. The wrapper builds an `EFFORT_MAP` of `(wire_id → spec)` from the per-tier configs, binding each tier's spec to the *wire-level* model id of `ANTHROPIC_DEFAULT_<TIER>_MODEL` (so per-tier overrides work whether `unlock_auto_mode=1` is in effect or not). Tier specs are emitted in priority order `small_fast → haiku → sonnet → opus`, so opus wins on wire-id collisions (the default — DeepSeek is single-tier). The proxy is started only when at least one spec is non-empty and not `off`; with `proxy_effort=off` and no per-tier overrides, the wrapper exports `ANTHROPIC_BASE_URL` directly to DeepSeek and never spawns the python child. One-shot env overrides: `CLAUDE_DS_PROXY_EFFORT=off` (skip the proxy for this invocation) and `CLAUDE_DS_PROXY_DEBUG=1` (log injections to stderr). The wrapper reads the bound port via a temporary FIFO with a 5-second timeout, fails fast if the proxy died on startup, and points `ANTHROPIC_BASE_URL` at `http://127.0.0.1:<port>` before `exec claude`.
+
+- `claude_ds_cleanup` consolidated EXIT/INT/TERM trap in `wrappers/claude-ds/claude-ds`. Replaces the prior tmux-only inline trap. Now kills the proxy PID (if spawned) and runs the existing tmux window/pane restoration in a single function. Note: once `exec claude` succeeds the trap can't fire (the shell is replaced), which is why the proxy carries its own orphan watchdog in addition.
+
+### Changed
+
+- `wrappers/claude-ds/claude-ds` version bumped to `0.5.0` for the reasoning-effort proxy. First-run config template now writes a documented block of `# proxy_effort=…` placeholders so users can discover the spec language without reading `--help`. The `--help` output gains a `REASONING-EFFORT PROXY` section covering the source-bucket thresholds, the spec grammar, the per-tier collision rule, and the env-var overrides.
+
 ## [0.4.0] - 2026-05-03
 
 ### Added
