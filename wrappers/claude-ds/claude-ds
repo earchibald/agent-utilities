@@ -43,9 +43,9 @@ DEFAULT_MODEL="deepseek-v4-pro"
 # written before any mutation.
 CURRENT_SCHEMA=1
 # Where to fetch the proxy script from when it is missing on disk and the
-# user has the proxy enabled. Pinned to `main` for now; once the project
-# graduates to its own repo this should pin to a tagged release.
-PROXY_DOWNLOAD_URL="https://raw.githubusercontent.com/earchibald/agent-utilities/main/wrappers/claude-ds/claude-ds-proxy.py"
+# user has the proxy enabled. Pinned to the claude-ds-0.6.0 tag; update
+# this when tagging the next release.
+PROXY_DOWNLOAD_URL="https://raw.githubusercontent.com/earchibald/agent-utilities/claude-ds-0.6.0/wrappers/claude-ds/claude-ds-proxy.py"
 # Known config keys (used by the validator and the damaged-config repair).
 # Anything in the config file outside this list is preserved with a warning.
 KNOWN_CONFIG_KEYS=(
