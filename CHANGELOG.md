@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.6.0] - 2026-05-03
+
+### Added
+
 - `wrappers/claude-ds/claude-ds` v0.6.0 — onboarding-and-self-healing release. The wrapper now does for the user nearly everything the previous README told the user to do manually. Specifically:
 
   - **Config schema versioning + auto-migration.** New `_schema=N` field in the config; the wrapper detects older schemas on launch, backs up the original to `<config>.v<old>.bak`, and migrates forward in place. Newer-than-supported schemas are rejected with a clear "upgrade claude-ds" message rather than silently corrupting data.
@@ -141,5 +149,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - macOS `osascript` notification and terminal bell on cache cliff — UI banner via `systemMessage` is sufficient.
 - Post-cliff "💀 session is dead" banner — replaced with pre-cliff warning so the user can act before losing the cache.
 
-[Unreleased]: https://github.com/earchibald/agent-utilities/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/earchibald/agent-utilities/compare/claude-ds-0.6.0...HEAD
+[0.6.0]: https://github.com/earchibald/agent-utilities/compare/v0.4.0...claude-ds-0.6.0
 [0.4.0]: https://github.com/earchibald/agent-utilities/compare/v0.3.0...v0.4.0
