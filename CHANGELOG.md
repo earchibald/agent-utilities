@@ -8,9 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-### Changed
-
-### Fixed
+- `wrappers/claude-ds/claude-ds`: Injects a self-description pseudo-skill via `--append-system-prompt` on `exec claude` so agents understand their claude-ds environment — covers config keys, secret schemes, proxy/regime model, auto-mode unlock, self-healing behaviour, and diagnostics. Concise by design (~260 words); agents can read the wrapper source or `--help` for full reference.
 
 ## [0.6.0] - 2026-05-03
 

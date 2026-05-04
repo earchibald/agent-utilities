@@ -1731,8 +1731,34 @@ claude_ds_cleanup() {
 }
 trap claude_ds_cleanup EXIT INT TERM
 
+# Inject a pseudo-skill via --append-system-prompt so agents can understand
+# their environment and help users configure claude-ds without needing the
+# README open. Concise by design — agents should read the wrapper source or
+# run `claude-ds --help` for full reference.
+CLAUDE_DS_SYSTEM_PROMPT="\
+# claude-ds
+You are running via **claude-ds** — a wrapper that routes \`claude\` through DeepSeek's Anthropic-compatible API.
+Your underlying model is \`${resolved_model:-deepseek-v4-pro}\`.
+
+## Config: ~/.config/claude-ds/config
+\`key=value\` file (mode 0600). Stanzas and \`#\` comments preserved.
+
+**Secret ref** (\`api_key_ref\`): \`op://VAULT/ITEM/FIELD\` (1Password), \`system://<acct>\` (keychain), \`infisical://PROJ/ENV/PATH#KEY\`, or a bare key. Run \`--rotate-key\` to change.
+
+**Model** (\`model\`): Default \`deepseek-v4-pro\`. Per-tier overrides: \`model_{opus,sonnet,haiku,small_fast}\`.
+
+**Auto mode** (\`unlock_auto_mode=1\`): Spoofs \`claude-opus-4-7\`/etc. model ids so Claude Code's permission classifier activates. \`/model\` picker shows real DeepSeek labels. Does NOT change which model actually serves requests.
+
+**Reasoning proxy** (\`proxy_effort\`, off by default): Translates \`thinking.budget_tokens\` into DeepSeek's \`reasoning_effort\` — 3 regimes: \`none\` (strip thinking), \`high\` (default depth), \`max\` (maximum). Per-tier via \`proxy_effort_{opus,sonnet,haiku,small_fast}\`. One-shot disable: \`CLAUDE_DS_PROXY_EFFORT=off\`.
+
+**Self-healing**: Schema auto-migrated on version bumps (\`<config>.v<N>.bak\` backed up). Damaged configs detected, backed up (\`<config>.broken.<ts>.bak\`), and repaired — no data lost. Missing proxy script lazy-fetched; absent curl/python3 soft-fallbacks (proxy off, config untouched).
+
+## Diagnostics
+- \`--doctor\`: 7-step health check (PATH, python3, config validity, secret resolution, API liveness, proxy presence, tier collision lint).
+- \`CLAUDE_DS_NO_BRANDING=1\`: Suppress tmux pane branding.
+- \`CLAUDE_DS_PROXY_DEBUG=1\`: Log proxy regime injections to stderr."
 # Separator between any claude-ds-owned output above and forwarded claude
 # output below. (Interactive TUI invocations of claude clear the screen, so
 # the rule is only visible for non-TUI uses like `claude -p` or after exit.)
 print_rule
-exec claude ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
+exec claude --append-system-prompt "$CLAUDE_DS_SYSTEM_PROMPT" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
